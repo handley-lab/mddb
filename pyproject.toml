@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mddb"
-version = "0.0.1"
+version = "0.0.2"
 description = "A YAML+markdown card substrate for agentic and human knowledge work"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,7 +12,8 @@ license = { text = "MIT" }
 authors = [
     {name = "Handley Research Group", email = "wh260@cam.ac.uk"}
 ]
-keywords = ["knowledge", "agents", "mcp", "yaml", "markdown", "substrate"]
+keywords = ["knowledge", "agents", "yaml", "markdown", "substrate"]
+dependencies = ["pyyaml>=6.0"]
 classifiers = [
     "Development Status :: 1 - Planning",
     "Intended Audience :: Developers",
@@ -24,6 +25,20 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.5", "pre-commit>=3.0", "tomli>=2.0"]
+
+[tool.ruff.lint]
+extend-select = ["D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"src/mddb/_*.py" = ["D"]
+"tests/*" = ["D"]
+"scripts/*" = ["D"]
+
 [project.urls]
 Homepage = "https://github.com/handley-lab/mddb"
 Repository = "https://github.com/handley-lab/mddb"
@@ -31,3 +46,6 @@ Issues = "https://github.com/handley-lab/mddb/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+mddb = ["*.sql"]

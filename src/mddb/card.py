@@ -15,8 +15,14 @@ class Card:
     Mutate ``yaml`` or ``body`` in place and pass the card to
     :meth:`MDDB.update` to persist.
 
+    The three substrate-privileged YAML keys are ``id``, ``title``, and
+    ``summary`` (the progressive-disclosure levels). The :attr:`id`,
+    :attr:`title`, and :attr:`summary` properties access them directly and
+    raise ``KeyError`` if missing.
+
     Attributes:
-        yaml: Frontmatter as a Python dict. Must contain an ``"id"`` key.
+        yaml: Frontmatter as a Python dict. Must contain ``"id"``;
+            ``"title"`` and ``"summary"`` are strongly expected.
         body: Markdown body text.
     """
 
@@ -27,6 +33,16 @@ class Card:
     def id(self) -> str:
         """Return the card's id (the ``"id"`` key of ``self.yaml``)."""
         return self.yaml["id"]
+
+    @property
+    def title(self) -> str:
+        """Return the card's title (substrate-privileged for progressive disclosure)."""
+        return self.yaml["title"]
+
+    @property
+    def summary(self) -> str:
+        """Return the card's summary (substrate-privileged for progressive disclosure)."""
+        return self.yaml["summary"]
 
     @classmethod
     def from_file(cls, path: Path) -> Card:

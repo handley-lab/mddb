@@ -215,6 +215,28 @@ class MDDB:
                 "UPDATE entries SET relpath = ? WHERE id = ?", (new_relpath, card_id)
             )
 
+    def list(self) -> list[dict]:
+        """Return every card's id, title, and summary — the progressive-disclosure summary view.
+
+        Cheap to call: pulls only the three substrate-privileged keys from
+        the SQLite cache (no body, no YAML parse). Use :meth:`read` for the
+        full card once a caller has decided which one to open.
+
+        Returns:
+            A list of ``{"id": str, "title": str | None, "summary": str | None}``
+            dicts, one per card. ``title`` and ``summary`` come back as
+            ``None`` for cards missing those keys.
+        """
+        rows = self.conn.execute(
+            "SELECT entries.id, t.value_str, s.value_str FROM entries "
+            "LEFT JOIN entry_fields t ON t.entry_rowid = entries.rowid AND t.key = 'title' "
+            "LEFT JOIN entry_fields s ON s.entry_rowid = entries.rowid AND s.key = 'summary'"
+        ).fetchall()
+        return [
+            {"id": cid, "title": title, "summary": summary}
+            for cid, title, summary in rows
+        ]
+
     def history(self, card_id: str) -> list[dict]:
         """Return the commit history of a card, newest first.
 

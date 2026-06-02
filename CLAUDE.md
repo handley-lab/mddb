@@ -2,7 +2,7 @@
 
 Guidance for Claude Code working in this repository.
 
-`mddb` is a Python library: a minimal YAML-frontmatter + markdown-body card substrate. Cards live as `.md` files in a directory under git; a SQLite index outside the directory (at `~/.cache/mddb/`) provides fast structured + full-text queries; rationales live in commit messages. The substrate has no domain knowledge — no `card_type`, no `status`, no `due`, no privileged keys other than `id`. Anything heavier (inventories, GTD, anything else) is layer code or, more usually, Alan reasoning in his REPL.
+`mddb` is a Python library: a minimal YAML-frontmatter + markdown-body card substrate. Cards live as `.md` files in a directory under git; a SQLite index outside the directory (at `~/.cache/mddb/`) provides fast structured + full-text queries; rationales live in commit messages. The substrate has no domain knowledge — no `card_type`, no `status`, no `due`. The only privileged YAML keys are **`id`, `title`, and `summary`** (the three disclosure levels — see "Progressive disclosure" below). Anything heavier (inventories, GTD, anything else) is layer code or, more usually, Alan reasoning in his REPL.
 
 First consumer: `alan` working in a persistent Python REPL. `import mddb; db = mddb.MDDB(path)`. There is no MCP server. There is no CLI. There is no TUI. There is no validation boundary — Alan constructs the calls.
 
@@ -62,6 +62,7 @@ class MDDB:
     def update(self, card: Card, *, rationale: str) -> Card: ...
     def delete(self, card_id: str, *, rationale: str) -> None: ...
     def move(self, card_id: str, new_relpath: str, *, rationale: str) -> None: ...
+    def list(self) -> list[dict]: ...  # [{id, title, summary}, ...] — progressive disclosure
     def history(self, card_id: str) -> list[dict]: ...
     conn: sqlite3.Connection  # exposed; write SQL against the schema below
 
@@ -70,6 +71,10 @@ class Card:
     body: str
     @property
     def id(self) -> str: return self.yaml["id"]
+    @property
+    def title(self) -> str: return self.yaml["title"]
+    @property
+    def summary(self) -> str: return self.yaml["summary"]
 ```
 
 `MDDB(path)` opens an existing mddb directory or creates a fresh one (with `git init` + `.gitignore`). One stderr line on creation so a typoed path is visible. `Card` is composition, not a dict subclass: callers write `card.yaml["key"] = value` and `card.body = "..."`. Equality, pickling, and hashing follow ordinary attribute semantics.
@@ -85,7 +90,7 @@ id: <uuid-v4>
 <markdown body>
 ```
 
-`id` is required. Substrate generates UUIDv4 on create if absent. YAML is loaded via `yaml.safe_load` (PyYAML defaults). Bare ISO dates parse as `datetime.date`; if you want date strings for lexicographic comparison, quote them in the source YAML.
+`id`, `title`, and `summary` are the three substrate-privileged keys (see "Progressive disclosure" below). `id` is required; the substrate generates a UUIDv4 on create if absent. `title` and `summary` are strongly expected — `Card.title` and `Card.summary` properties raise `KeyError` if missing (same pattern as `Card.id`); `MDDB.list()` returns `None` for missing values via `LEFT JOIN`. YAML is loaded via `yaml.safe_load` (PyYAML defaults). Bare ISO dates parse as `datetime.date`; if you want date strings for lexicographic comparison, quote them in the source YAML.
 
 Two PyYAML default overrides on the write path (`yaml.safe_dump(data, sort_keys=False, allow_unicode=True)`): `sort_keys=False` so cards retain the field order the caller wrote (alphabetised output reorders frontmatter on every update, which is jarring in git diffs); `allow_unicode=True` so international characters aren't escaped into `\\uXXXX` sequences in the on-disk YAML.
 
@@ -115,7 +120,7 @@ SQLite default journal mode (single-writer). FTS sync via the standard external-
 
 ### Querying
 
-There is no `search` / `list` / `compile_filter`. The substrate exposes `db.conn` and the schema; callers compose SQL directly. Examples:
+There is no `search` / `compile_filter`. The substrate exposes `db.conn` and the schema; callers compose SQL directly. Examples:
 
 ```python
 # full-text
@@ -135,6 +140,33 @@ cards = [db.read(i) for i in ids]
 ```
 
 If a particular query pattern shows up repeatedly in caller code, abstract it *in the caller*, not in the substrate.
+
+### Progressive disclosure
+
+Three disclosure levels — `id` → `title` → `summary` → full card. This is how an agent navigates a large mddb without burning tokens on every body.
+
+```python
+# Level 1: headlines — just id and title
+for cid, title in db.conn.execute(
+    "SELECT entries.id, f.value_str FROM entries "
+    "LEFT JOIN entry_fields f "
+    "  ON f.entry_rowid = entries.rowid AND f.key = 'title'"
+):
+    ...
+
+# Level 2: summary view — id, title, summary (this is what db.list() returns)
+for entry in db.list():
+    print(entry["id"], entry["title"], "—", entry["summary"])
+
+# Level 3: full card
+card = db.read(some_id)
+card.title       # raises KeyError if 'title' is missing
+card.summary     # raises KeyError if 'summary' is missing
+card.body        # markdown
+card.yaml        # full dict
+```
+
+`id`, `title`, and `summary` are the three privileged YAML keys (substrate-level). Any other field (e.g. `tags`, `due`, `location`) is layer-defined and reached via raw SQL through `entry_fields`.
 
 ## Style
 

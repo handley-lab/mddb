@@ -74,6 +74,47 @@ def test_field_filter_via_conn(db):
     assert [r[0] for r in rows] == [a.id]
 
 
+def test_list_progressive_disclosure(db):
+    a = db.create(
+        {"title": "Fridge", "summary": "What's in the fridge.", "tags": ["fridge"]},
+        body="milk, eggs",
+        rationale="testing progressive disclosure — fridge card",
+    )
+    b = db.create(
+        {"title": "Shed", "summary": "Tools and equipment."},
+        rationale="testing progressive disclosure — shed card without body or tags",
+    )
+    entries = sorted(db.list(), key=lambda e: e["title"])
+    assert entries == [
+        {"id": a.id, "title": "Fridge", "summary": "What's in the fridge."},
+        {"id": b.id, "title": "Shed", "summary": "Tools and equipment."},
+    ]
+
+
+def test_card_title_summary_properties(db):
+    card = db.create(
+        {"title": "Fridge", "summary": "What's in the fridge."},
+        body="milk",
+        rationale="testing card properties — title and summary are direct dict access",
+    )
+    again = db.read(card.id)
+    assert again.title == "Fridge"
+    assert again.summary == "What's in the fridge."
+
+
+def test_card_title_raises_when_missing(db):
+    import pytest as _pytest
+
+    card = db.create(
+        {"tags": ["shed"]},
+        rationale="testing crash on missing — card without title",
+    )
+    with _pytest.raises(KeyError):
+        _ = card.title
+    with _pytest.raises(KeyError):
+        _ = card.summary
+
+
 def test_history(db):
     card = db.create({"x": 1}, body="hello", rationale="initial commit message")
     card.yaml["x"] = 2

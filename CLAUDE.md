@@ -98,7 +98,7 @@ The substrate has no opinion about directory structure or slugs. `create(relpath
 3. Create / update: `git add -- <relpath>`. Delete: `git rm -- <relpath>`. Then `git commit -m <rationale>`.
 4. Insert / update / delete the matching row in SQLite inside `with self.conn:`. If this raises, the `sqlite3.Error` propagates; the cache may be left in a stale state.
 
-The next `MDDB(path)` opens the cache only if `meta.schema_version` matches; otherwise (or if missing / unreadable) it rebuilds from `.md` files on disk. There is no automatic stale-cache detection. If a SQLite mutation fails and you want a fresh index, `rm ~/.cache/mddb/<sha1(abs-path)>/index.sqlite` and reopen. Git and SQLite failures propagate; if `git commit` fails after `os.replace`, the working tree is dirty and the caller resolves with the native exception.
+The next `MDDB(path)` opens the cache if `meta.schema_version` matches; if the cache file is missing or carries a different version, it rebuilds from `.md` files on disk. Other SQLite failures (corruption, missing tables) propagate as `sqlite3.Error`. There is no automatic stale-cache detection. If a SQLite mutation fails and you want a fresh index, `rm ~/.cache/mddb/<sha1(abs-path)>/index.sqlite` and reopen. Git and SQLite failures propagate; if `git commit` fails after `os.replace`, the working tree is dirty and the caller resolves with the native exception.
 
 ### SQLite
 

@@ -34,7 +34,7 @@ def test_move_keeps_id(db):
 
 
 def test_fts_via_conn(db):
-    card = db.create({"tags": ["shed"]}, body="wheelbarrow and spade", rationale="audit")
+    card = db.create({"tags": ["shed"]}, body="wheelbarrow and spade", rationale="testing fts — body should match wheelbarrow")
     rows = db.conn.execute(
         "SELECT id FROM entries WHERE rowid IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ?)",
         ("wheelbarrow",),
@@ -62,7 +62,7 @@ def test_history(db):
 
 
 def test_relpath(db):
-    db.create({"location": "shed"}, relpath="inventory/shed.md", rationale="audit")
+    db.create({"location": "shed"}, relpath="inventory/shed.md", rationale="testing explicit relpath — caller-chosen inventory path")
     assert (db.root / "inventory" / "shed.md").exists()
 
 

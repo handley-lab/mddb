@@ -1,6 +1,6 @@
 import pytest
-
 import yaml as pyyaml
+
 from mddb.card import Card
 
 

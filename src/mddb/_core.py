@@ -13,7 +13,9 @@ from .card import Card
 
 
 def _dump(data: dict) -> str:
-    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True, default_flow_style=False)
+    return yaml.safe_dump(
+        data, sort_keys=False, allow_unicode=True, default_flow_style=False
+    )
 
 
 class MDDB:
@@ -25,7 +27,9 @@ class MDDB:
             print(f"mddb: initialised new mddb at {self.root}", file=sys.stderr)
         self.conn = _index.open_index(self.root)
 
-    def create(self, yaml: dict, body: str = "", *, relpath: str | None = None, rationale: str) -> Card:
+    def create(
+        self, yaml: dict, body: str = "", *, relpath: str | None = None, rationale: str
+    ) -> Card:
         yaml = dict(yaml)
         if "id" not in yaml:
             yaml["id"] = str(uuid.uuid4())
@@ -57,12 +61,16 @@ class MDDB:
         self._git("add", "--", relpath)
         self._git("commit", "-m", rationale)
         with self.conn:
-            rowid = self.conn.execute("SELECT rowid FROM entries WHERE id = ?", (card.id,)).fetchone()[0]
+            rowid = self.conn.execute(
+                "SELECT rowid FROM entries WHERE id = ?", (card.id,)
+            ).fetchone()[0]
             self.conn.execute(
                 "UPDATE entries SET yaml_text = ?, body = ? WHERE rowid = ?",
                 (_dump(card.yaml), card.body, rowid),
             )
-            self.conn.execute("DELETE FROM entry_fields WHERE entry_rowid = ?", (rowid,))
+            self.conn.execute(
+                "DELETE FROM entry_fields WHERE entry_rowid = ?", (rowid,)
+            )
             _index.index_fields(self.conn, rowid, card.yaml)
         return card
 
@@ -80,12 +88,18 @@ class MDDB:
         self._git("mv", "--", old, new_relpath)
         self._git("commit", "-m", rationale)
         with self.conn:
-            self.conn.execute("UPDATE entries SET relpath = ? WHERE id = ?", (new_relpath, card_id))
+            self.conn.execute(
+                "UPDATE entries SET relpath = ? WHERE id = ?", (new_relpath, card_id)
+            )
 
     def history(self, card_id: str) -> list[dict]:
         relpath = self._relpath(card_id)
         out = self._git(
-            "log", "--follow", "--pretty=format:%H%x00%an%x00%aI%x00%B%x1e", "--", relpath,
+            "log",
+            "--follow",
+            "--pretty=format:%H%x00%an%x00%aI%x00%B%x1e",
+            "--",
+            relpath,
         ).stdout
         commits = []
         for chunk in out.split("\x1e"):
@@ -93,11 +107,15 @@ class MDDB:
             if not chunk:
                 continue
             sha, author, ts, message = chunk.split("\x00", 3)
-            commits.append({"sha": sha, "author": author, "timestamp": ts, "message": message})
+            commits.append(
+                {"sha": sha, "author": author, "timestamp": ts, "message": message}
+            )
         return commits
 
     def _relpath(self, card_id: str) -> str:
-        row = self.conn.execute("SELECT relpath FROM entries WHERE id = ?", (card_id,)).fetchone()
+        row = self.conn.execute(
+            "SELECT relpath FROM entries WHERE id = ?", (card_id,)
+        ).fetchone()
         if row is None:
             raise KeyError(card_id)
         return row[0]
@@ -114,7 +132,9 @@ class MDDB:
         self._git("commit", "-m", "initial commit")
 
     def _git(self, *args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(["git", *args], cwd=self.root, check=True, capture_output=True, text=True)
+        return subprocess.run(
+            ["git", *args], cwd=self.root, check=True, capture_output=True, text=True
+        )
 
     def _validate_relpath(self, relpath: str) -> None:
         if not relpath.endswith(".md"):

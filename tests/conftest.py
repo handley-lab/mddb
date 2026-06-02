@@ -21,7 +21,9 @@ def _git_identity():
 
 
 def _git_config(key):
-    r = subprocess.run(["git", "config", "--global", "--get", key], capture_output=True, text=True)
+    r = subprocess.run(
+        ["git", "config", "--global", "--get", key], capture_output=True, text=True
+    )
     return r.stdout.strip()
 
 

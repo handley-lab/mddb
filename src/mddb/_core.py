@@ -40,16 +40,12 @@ class MDDB:
         self._write_atomic(target, str(card))
         self._git("add", "--", relpath)
         self._git("commit", "-m", rationale)
-        try:
-            with self.conn:
-                cur = self.conn.execute(
-                    "INSERT INTO entries(id, relpath, yaml_text, body) VALUES (?, ?, ?, ?)",
-                    (card.id, relpath, _dump(card.yaml), card.body),
-                )
-                _index.index_fields(self.conn, cur.lastrowid, card.yaml)
-        except Exception:
-            self._drop_cache()
-            raise
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO entries(id, relpath, yaml_text, body) VALUES (?, ?, ?, ?)",
+                (card.id, relpath, _dump(card.yaml), card.body),
+            )
+            _index.index_fields(self.conn, cur.lastrowid, card.yaml)
         return card
 
     def read(self, card_id: str) -> Card:
@@ -60,30 +56,22 @@ class MDDB:
         self._write_atomic(self.root / relpath, str(card))
         self._git("add", "--", relpath)
         self._git("commit", "-m", rationale)
-        try:
-            with self.conn:
-                rowid = self.conn.execute("SELECT rowid FROM entries WHERE id = ?", (card.id,)).fetchone()[0]
-                self.conn.execute(
-                    "UPDATE entries SET yaml_text = ?, body = ? WHERE rowid = ?",
-                    (_dump(card.yaml), card.body, rowid),
-                )
-                self.conn.execute("DELETE FROM entry_fields WHERE entry_rowid = ?", (rowid,))
-                _index.index_fields(self.conn, rowid, card.yaml)
-        except Exception:
-            self._drop_cache()
-            raise
+        with self.conn:
+            rowid = self.conn.execute("SELECT rowid FROM entries WHERE id = ?", (card.id,)).fetchone()[0]
+            self.conn.execute(
+                "UPDATE entries SET yaml_text = ?, body = ? WHERE rowid = ?",
+                (_dump(card.yaml), card.body, rowid),
+            )
+            self.conn.execute("DELETE FROM entry_fields WHERE entry_rowid = ?", (rowid,))
+            _index.index_fields(self.conn, rowid, card.yaml)
         return card
 
     def delete(self, card_id: str, *, rationale: str) -> None:
         relpath = self._relpath(card_id)
         self._git("rm", "--", relpath)
         self._git("commit", "-m", rationale)
-        try:
-            with self.conn:
-                self.conn.execute("DELETE FROM entries WHERE id = ?", (card_id,))
-        except Exception:
-            self._drop_cache()
-            raise
+        with self.conn:
+            self.conn.execute("DELETE FROM entries WHERE id = ?", (card_id,))
 
     def move(self, card_id: str, new_relpath: str, *, rationale: str) -> None:
         old = self._relpath(card_id)
@@ -91,12 +79,8 @@ class MDDB:
         (self.root / new_relpath).parent.mkdir(parents=True, exist_ok=True)
         self._git("mv", "--", old, new_relpath)
         self._git("commit", "-m", rationale)
-        try:
-            with self.conn:
-                self.conn.execute("UPDATE entries SET relpath = ? WHERE id = ?", (new_relpath, card_id))
-        except Exception:
-            self._drop_cache()
-            raise
+        with self.conn:
+            self.conn.execute("UPDATE entries SET relpath = ? WHERE id = ?", (new_relpath, card_id))
 
     def history(self, card_id: str) -> list[dict]:
         relpath = self._relpath(card_id)
@@ -138,7 +122,3 @@ class MDDB:
         p = Path(relpath)
         if p.is_absolute() or ".." in p.parts:
             raise ValueError(f"invalid relpath: {relpath}")
-
-    def _drop_cache(self) -> None:
-        self.conn.close()
-        _index.cache_path(self.root).unlink(missing_ok=True)

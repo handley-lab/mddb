@@ -65,7 +65,16 @@ class MDDB:
     def move(self, card_id: str, new_relpath: str, *, rationale: str) -> None: ...
     def list(self) -> list[dict]: ...  # [{id, title, summary}, ...] — progressive disclosure
     def history(self, card_id: str) -> list[dict]: ...
+    def transaction(self, *, rationale: str) -> Transaction: ...
     conn: sqlite3.Connection  # exposed; write SQL against the schema below
+
+class Transaction:
+    def create(self, *, title: str, summary: str, yaml: dict | None = None,
+               body: str = "", relpath: str | None = None) -> Card: ...
+    def read(self, card_id: str) -> Card: ...
+    def update(self, card: Card, *, summary: str) -> Card: ...
+    def delete(self, card_id: str) -> None: ...
+    def move(self, card_id: str, new_relpath: str) -> None: ...
 
 class Card:
     yaml: dict
@@ -150,6 +159,30 @@ cards = [db.read(i) for i in ids]
 ```
 
 If a particular query pattern shows up repeatedly in caller code, abstract it *in the caller*, not in the substrate.
+
+### Transactions
+
+`db.transaction(rationale=...)` returns a context manager that buffers mutations (`create`/`update`/`delete`/`move`) and materialises them as one git commit + one SQLite transaction on clean `__exit__`. `tx.read()` sees the staged buffer; it is not itself buffered. On body exception, the buffer is dropped and the mddb root is untouched.
+
+```python
+with db.transaction(rationale="bulk import of inventory cards") as tx:
+    a = tx.create(title="Fridge", summary="...", body="...")
+    b = tx.create(title="Shed",   summary="...", body="...")
+    tx.update(a, summary="...")
+    tx.move(b.id, "inventory/shed.md")
+```
+
+Clean exit produces one commit covering all four operations. A body exception inside the `with` block produces no commit and no on-disk change.
+
+The transaction rationale is the single commit message for the whole batch; there is no per-operation rationale. `tx.update(card, summary=...)` still requires `summary` for the same reason `db.update` does — the caller acknowledges the disclosure decision at every mutation.
+
+Returned `Card` objects are deep copies; mutate them freely without affecting the staged buffer. Mutation must go through `tx.update()` to persist.
+
+Operation collapse in a single transaction: create + update → one create with mutated card; create + delete → no-op; update + delete → one delete; move + update → staged update at the new relpath; double-create at the same id → `RuntimeError`. Modify-after-delete raises `KeyError`.
+
+Atomicity scope. The "body exception → no on-disk change" guarantee covers calls through the public `MDDB` and `Transaction` mutator API only. Direct calls to `db.create/update/delete/move` during an active transaction raise `RuntimeError`; reads (`db.read`, `db.list`, `db.history`, raw `db.conn` SELECTs) remain available and see committed state, not the staged buffer. Once the commit phase begins, git/SQLite failures propagate native exceptions; the working tree or cache may be left dirty, matching the single-op mutation policy in "Mutation flow" above.
+
+Nested transactions raise `RuntimeError`. A `Transaction` object is single-shot: after exit (clean, body exception, or commit-phase failure) it cannot be reused.
 
 ### Progressive disclosure
 

@@ -1,7 +1,7 @@
 import pytest
 import yaml as pyyaml
 
-from mddb.card import Card
+from mddb.card import Card, slugify
 
 
 def test_dates_parse_as_dates():
@@ -24,3 +24,16 @@ def test_roundtrip():
 def test_missing_opening_delimiter():
     with pytest.raises(ValueError):
         Card.from_text("id: x\n---\nbody\n")
+
+
+def test_slugify_basic():
+    assert slugify("Fridge Inventory") == "fridge-inventory"
+
+
+def test_slugify_collapses_punctuation():
+    assert slugify("Will's GTD: Notes (2026)") == "will-s-gtd-notes-2026"
+
+
+def test_slugify_empty_becomes_untitled():
+    assert slugify("") == "untitled"
+    assert slugify("---") == "untitled"

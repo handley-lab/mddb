@@ -57,9 +57,10 @@ The mddb directory stays clean of mddb-specific cruft. The cache is fully derive
 ```python
 class MDDB:
     def __init__(self, path: Path | str): ...
-    def create(self, yaml: dict, body: str = "", *, relpath: str | None = None, rationale: str) -> Card: ...
+    def create(self, *, title: str, summary: str, yaml: dict | None = None,
+               body: str = "", rationale: str, relpath: str | None = None) -> Card: ...
     def read(self, card_id: str) -> Card: ...
-    def update(self, card: Card, *, rationale: str) -> Card: ...
+    def update(self, card: Card, *, summary: str, rationale: str) -> Card: ...
     def delete(self, card_id: str, *, rationale: str) -> None: ...
     def move(self, card_id: str, new_relpath: str, *, rationale: str) -> None: ...
     def list(self) -> list[dict]: ...  # [{id, title, summary}, ...] — progressive disclosure
@@ -90,13 +91,22 @@ id: <uuid-v4>
 <markdown body>
 ```
 
-`id`, `title`, and `summary` are the three substrate-privileged keys (see "Progressive disclosure" below). `id` is required; the substrate generates a UUIDv4 on create if absent. `title` and `summary` are strongly expected — `Card.title` and `Card.summary` properties raise `KeyError` if missing (same pattern as `Card.id`); `MDDB.list()` returns `None` for missing values via `LEFT JOIN`. YAML is loaded via `yaml.safe_load` (PyYAML defaults). Bare ISO dates parse as `datetime.date`; if you want date strings for lexicographic comparison, quote them in the source YAML.
+`id`, `title`, and `summary` are the three substrate-privileged keys (see "Progressive disclosure" below). All three are present on every card created through the API: `MDDB.create(title=..., summary=..., ...)` requires the two disclosure kwargs and inserts them into the YAML, plus a UUIDv4 `id` if the caller didn't supply one. `MDDB.update(card, summary=..., ...)` also requires `summary` so the caller must make a deliberate decision about disclosure currency at every mutation (pass the existing value to acknowledge it's still accurate, or pass a new one to re-summarise). `Card.id`/`Card.title`/`Card.summary` use direct dict access and raise `KeyError` only if a card from a different source (manual file write, gtd import) lacks them. `MDDB.list()` returns `None` for missing values via `LEFT JOIN` to keep incomplete cards visible during overviews. YAML is loaded via `yaml.safe_load` (PyYAML defaults). Bare ISO dates parse as `datetime.date`; if you want date strings for lexicographic comparison, quote them in the source YAML.
 
 Two PyYAML default overrides on the write path (`yaml.safe_dump(data, sort_keys=False, allow_unicode=True)`): `sort_keys=False` so cards retain the field order the caller wrote (alphabetised output reorders frontmatter on every update, which is jarring in git diffs); `allow_unicode=True` so international characters aren't escaped into `\\uXXXX` sequences in the on-disk YAML.
 
 ### Directories and slugs
 
-The substrate has no opinion about directory structure or slugs. `create(relpath=None)` writes to `<path>/<id>.md` (UUID-flat). `create(relpath="inventory/fridge.md")` writes to exactly that path. The caller decides; no inference from `yaml["doctype"]` or `yaml["title"]`. `move(card_id, new_relpath, rationale=...)` renames in place (`git mv` + index update); the id stays the same so history follows.
+Title drives the default file slug; directory is the caller's choice via `relpath`. Resolution rules:
+
+- `relpath=None` → `<slugify(title)>.md` (flat at root).
+- `relpath="inventory/"` (trailing slash) → directory; substrate appends `<slugify(title)>.md`.
+- `relpath="inventory/fridge"` → substrate appends `.md`.
+- `relpath="inventory/fridge.md"` → used verbatim.
+
+`slugify()` is in `mddb.card`: lowercases, replaces runs of non-word characters with hyphens, returns `"untitled"` for empty input.
+
+Title and directory are **orthogonal**: title is *what the card is*; directory is *where the caller chose to put it*. Title changes do not move the file — `db.update()` rewrites in place. To rename the file, call `db.move(card_id, new_relpath, rationale=...)` explicitly (`git mv` + index update; id stays the same so history follows). Collisions on the resolved relpath raise `FileExistsError`; the caller resolves by changing the title or passing an explicit `relpath`.
 
 ### Mutation flow
 

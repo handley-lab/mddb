@@ -2,10 +2,22 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+
+def slugify(text: str) -> str:
+    """Convert a title to a filesystem-safe slug.
+
+    Lowercases, replaces runs of non-word characters with single hyphens,
+    strips leading/trailing hyphens. Returns ``"untitled"`` if the result
+    is empty.
+    """
+    slug = re.sub(r"\W+", "-", text.lower()).strip("-")
+    return slug or "untitled"
 
 
 @dataclass

@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mddb"
+version = "0.0.1"
+description = "A YAML+markdown card substrate for agentic and human knowledge work"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    {name = "Handley Research Group", email = "wh260@cam.ac.uk"}
+]
+keywords = ["knowledge", "agents", "mcp", "yaml", "markdown", "substrate"]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Homepage = "https://github.com/handley-lab/mddb"
+Repository = "https://github.com/handley-lab/mddb"
+Issues = "https://github.com/handley-lab/mddb/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]

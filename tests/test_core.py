@@ -103,16 +103,22 @@ def test_card_title_summary_properties(db):
 
 
 def test_card_title_raises_when_missing(db):
-    import pytest as _pytest
-
     card = db.create(
         {"tags": ["shed"]},
         rationale="testing crash on missing — card without title",
     )
-    with _pytest.raises(KeyError):
+    with pytest.raises(KeyError):
         _ = card.title
-    with _pytest.raises(KeyError):
+    with pytest.raises(KeyError):
         _ = card.summary
+
+
+def test_list_returns_none_for_missing_disclosure_fields(db):
+    card = db.create(
+        {"tags": ["shed"]},
+        rationale="testing list graceful — card without title or summary still appears",
+    )
+    assert db.list() == [{"id": card.id, "title": None, "summary": None}]
 
 
 def test_history(db):

@@ -31,7 +31,7 @@ These rules bound this codebase. They are themselves bound by lean code — don'
 ## Design shape
 
 - Files are truth; SQLite is a derived cache at `~/.cache/mddb/<sha1(abs-path)>/index.sqlite`; git records rationale/history.
-- Core substrate has no domain fields beyond `id`. Flat YAML.
+- Core substrate has no domain fields. The only privileged YAML keys are `id`, `title`, and `summary` (the three progressive-disclosure levels). Flat YAML.
 - Mutation order: filesystem → git → SQLite. SQLite failures propagate; the cache may be left stale. Delete the cache file manually if you want a fresh one.
 - Subprocess git via `subprocess.run(["git", ...], check=True)`. No GitPython (it's itself a subprocess wrapper — adds API cost without value). No libgit2 (gtd dropped it after fighting it). If bulk operations ever bottleneck, dulwich (pure-Python git) is the leanest alternative — not another wrapper.
 - No MCP, no CLI, no GUI in the prototype.

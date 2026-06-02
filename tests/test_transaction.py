@@ -208,9 +208,7 @@ def test_transaction_create_then_delete(db):
 
 
 def test_transaction_delete_then_create_same_relpath(db):
-    seed = db.create(
-        title="Old", summary="old", relpath="slot.md", rationale="seed"
-    )
+    seed = db.create(title="Old", summary="old", relpath="slot.md", rationale="seed")
     before = _git_log_count(db)
     with db.transaction(rationale="swap") as tx:
         tx.delete(seed.id)
@@ -346,9 +344,7 @@ def test_transaction_delete_after_staged_move(db):
 
 
 def test_transaction_read_returns_deep_copy_for_updates(db):
-    seed = db.create(
-        title="A", summary="A", yaml={"tags": []}, rationale="seed"
-    )
+    seed = db.create(title="A", summary="A", yaml={"tags": []}, rationale="seed")
     with db.transaction(rationale="deep copy update") as tx:
         seed.body = "changed"
         returned = tx.update(seed, summary="A")
@@ -408,9 +404,7 @@ def test_transaction_move_away_and_back_collapses(db):
 
 
 def test_transaction_update_input_card_is_copied(db):
-    seed = db.create(
-        title="A", summary="A", yaml={"tags": []}, rationale="seed"
-    )
+    seed = db.create(title="A", summary="A", yaml={"tags": []}, rationale="seed")
     with db.transaction(rationale="input copy") as tx:
         seed.body = "changed"
         tx.update(seed, summary=seed.summary)

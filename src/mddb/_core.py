@@ -504,11 +504,17 @@ class Transaction:
             raise KeyError(card_id)
         if staged is not None and staged.original_relpath is None:
             del self._staged[card_id]
-            if staged.relpath is not None and self._relpaths.get(staged.relpath) == card_id:
+            if (
+                staged.relpath is not None
+                and self._relpaths.get(staged.relpath) == card_id
+            ):
                 del self._relpaths[staged.relpath]
             return
         if staged is not None:
-            if staged.relpath is not None and self._relpaths.get(staged.relpath) == card_id:
+            if (
+                staged.relpath is not None
+                and self._relpaths.get(staged.relpath) == card_id
+            ):
                 del self._relpaths[staged.relpath]
             self._staged[card_id] = _Staged(
                 card=None, original_relpath=staged.original_relpath, relpath=None
@@ -617,9 +623,7 @@ class Transaction:
                             staged.card.body,
                         ),
                     )
-                    index.index_fields(
-                        self._db.conn, cur.lastrowid, staged.card.yaml
-                    )
+                    index.index_fields(self._db.conn, cur.lastrowid, staged.card.yaml)
                     continue
                 rowid = self._db.conn.execute(
                     "SELECT rowid FROM entries WHERE id = ?", (card_id,)

@@ -458,6 +458,115 @@ class Transaction:
         self._relpaths[resolved] = new_id
         return _copy(new_card)
 
+    def read(self, card_id: str) -> Card:
+        """Read a card with staged-state visibility."""
+        if self._closed:
+            raise RuntimeError("transaction already closed")
+        staged = self._staged.get(card_id)
+        if staged is not None:
+            if staged.card is None and staged.relpath is None:
+                raise KeyError(card_id)
+            if staged.card is not None:
+                return _copy(staged.card)
+            return _copy(self._db.read(card_id))
+        return self._db.read(card_id)
+
+    def update(self, card: Card, *, summary: str) -> Card:
+        """Stage an update to ``card``. Caller's ``Card`` is deep-copied before staging."""
+        if self._closed:
+            raise RuntimeError("transaction already closed")
+        card.yaml["summary"] = summary
+        card_id = card.id
+        staged = self._staged.get(card_id)
+        if staged is not None and staged.card is None and staged.relpath is None:
+            raise KeyError(card_id)
+        staged_card = _copy(card)
+        if staged is None:
+            original = self._db._relpath(card_id)
+            self._staged[card_id] = _Staged(
+                card=staged_card, original_relpath=original, relpath=original
+            )
+            self._relpaths[original] = card_id
+        else:
+            self._staged[card_id] = _Staged(
+                card=staged_card,
+                original_relpath=staged.original_relpath,
+                relpath=staged.relpath,
+            )
+        return _copy(card)
+
+    def delete(self, card_id: str) -> None:
+        """Stage a delete of ``card_id``."""
+        if self._closed:
+            raise RuntimeError("transaction already closed")
+        staged = self._staged.get(card_id)
+        if staged is not None and staged.card is None and staged.relpath is None:
+            raise KeyError(card_id)
+        if staged is not None and staged.original_relpath is None:
+            del self._staged[card_id]
+            if staged.relpath is not None and self._relpaths.get(staged.relpath) == card_id:
+                del self._relpaths[staged.relpath]
+            return
+        if staged is not None:
+            if staged.relpath is not None and self._relpaths.get(staged.relpath) == card_id:
+                del self._relpaths[staged.relpath]
+            self._staged[card_id] = _Staged(
+                card=None, original_relpath=staged.original_relpath, relpath=None
+            )
+            return
+        original = self._db._relpath(card_id)
+        self._staged[card_id] = _Staged(
+            card=None, original_relpath=original, relpath=None
+        )
+
+    def move(self, card_id: str, new_relpath: str) -> None:
+        """Stage a relpath change for ``card_id``."""
+        if self._closed:
+            raise RuntimeError("transaction already closed")
+        self._db._validate_relpath(new_relpath)
+        staged = self._staged.get(card_id)
+        if staged is not None and staged.card is None and staged.relpath is None:
+            raise KeyError(card_id)
+        if staged is not None:
+            current = staged.relpath
+        else:
+            current = self._db._relpath(card_id)
+        if new_relpath == current:
+            return
+        owner = self._relpaths.get(new_relpath)
+        if owner is not None and owner != card_id:
+            raise FileExistsError(new_relpath)
+        if (self._db.root / new_relpath).exists():
+            if staged is None or staged.original_relpath != new_relpath:
+                raise FileExistsError(new_relpath)
+        if staged is None:
+            original = self._db._relpath(card_id)
+            new_record = _Staged(
+                card=None, original_relpath=original, relpath=new_relpath
+            )
+        elif staged.original_relpath is None:
+            new_record = _Staged(
+                card=staged.card, original_relpath=None, relpath=new_relpath
+            )
+        else:
+            new_record = _Staged(
+                card=staged.card,
+                original_relpath=staged.original_relpath,
+                relpath=new_relpath,
+            )
+        if current is not None and self._relpaths.get(current) == card_id:
+            del self._relpaths[current]
+        if (
+            new_record.card is None
+            and new_record.original_relpath is not None
+            and new_record.relpath == new_record.original_relpath
+        ):
+            if card_id in self._staged:
+                del self._staged[card_id]
+            return
+        self._staged[card_id] = new_record
+        self._relpaths[new_relpath] = card_id
+
     def _staged_delete_at(self, path: str) -> bool:
         return any(
             s.original_relpath == path and s.card is None and s.relpath is None
@@ -466,6 +575,19 @@ class Transaction:
 
     def _commit(self) -> None:
         for staged in self._staged.values():
+            if staged.card is None and staged.relpath is None:
+                self._db._git("rm", "--", staged.original_relpath)
+        for staged in self._staged.values():
+            if (
+                staged.original_relpath is not None
+                and staged.relpath is not None
+                and staged.relpath != staged.original_relpath
+            ):
+                (self._db.root / staged.relpath).parent.mkdir(
+                    parents=True, exist_ok=True
+                )
+                self._db._git("mv", "--", staged.original_relpath, staged.relpath)
+        for staged in self._staged.values():
             if staged.card is not None and staged.relpath is not None:
                 target = self._db.root / staged.relpath
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -473,10 +595,15 @@ class Transaction:
                 self._db._git("add", "--", staged.relpath)
         self._db._git("commit", "-m", self._rationale)
         with self._db.conn:
-            for staged in self._staged.values():
+            for card_id, staged in self._staged.items():
+                if staged.card is None and staged.relpath is None:
+                    self._db.conn.execute(
+                        "DELETE FROM entries WHERE id = ?", (card_id,)
+                    )
+                    continue
                 if (
-                    staged.card is not None
-                    and staged.original_relpath is None
+                    staged.original_relpath is None
+                    and staged.card is not None
                     and staged.relpath is not None
                 ):
                     cur = self._db.conn.execute(
@@ -493,3 +620,28 @@ class Transaction:
                     index.index_fields(
                         self._db.conn, cur.lastrowid, staged.card.yaml
                     )
+                    continue
+                rowid = self._db.conn.execute(
+                    "SELECT rowid FROM entries WHERE id = ?", (card_id,)
+                ).fetchone()[0]
+                if staged.card is None:
+                    self._db.conn.execute(
+                        "UPDATE entries SET relpath = ? WHERE rowid = ?",
+                        (staged.relpath, rowid),
+                    )
+                else:
+                    self._db.conn.execute(
+                        "UPDATE entries SET relpath = ?, yaml_text = ?, body = ? WHERE rowid = ?",
+                        (
+                            staged.relpath,
+                            pyyaml.safe_dump(
+                                staged.card.yaml, sort_keys=False, allow_unicode=True
+                            ),
+                            staged.card.body,
+                            rowid,
+                        ),
+                    )
+                    self._db.conn.execute(
+                        "DELETE FROM entry_fields WHERE entry_rowid = ?", (rowid,)
+                    )
+                    index.index_fields(self._db.conn, rowid, staged.card.yaml)

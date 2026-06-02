@@ -12,12 +12,9 @@ import mddb
 db = mddb.MDDB("~/my-mddb")
 
 card = db.create(
-    {
-        "title": "Shed inventory",
-        "summary": "Tools and equipment kept in the shed.",
-        "tags": ["shed"],
-        "location": "shed",
-    },
+    title="Shed inventory",
+    summary="Tools and equipment kept in the shed.",
+    yaml={"tags": ["shed"], "location": "shed"},
     body="A wheelbarrow.",
     rationale="bought today",
 )
@@ -27,7 +24,19 @@ card = db.read(card.id)
 
 # mutate and write back
 card.yaml["location"] = "barn"
-db.update(card, rationale="moved to barn")
+db.update(
+    card,
+    summary="Tools and equipment, moved to the barn.",
+    rationale="moved to barn",
+)
+```
+
+Batch many mutations into one commit + one SQLite transaction. A body exception inside the `with` block discards the buffer; on-disk state is unchanged.
+
+```python
+with db.transaction(rationale="bulk import") as tx:
+    for item in ["fridge", "shed", "loft"]:
+        tx.create(title=item.title(), summary=f"contents of the {item}")
 
 # full-text via raw SQL — no DSL
 ids = [r[0] for r in db.conn.execute(

@@ -139,7 +139,7 @@ If a particular query pattern shows up repeatedly in caller code, abstract it *i
 ## Style
 
 - Comments explain *why*, not *what*. Names explain *what*. If you find yourself writing a comment to explain a name, change the name instead.
-- No inline `#` comments. Docstrings only when the why is non-obvious (a hidden constraint, a subtle invariant, a workaround for a specific bug, behaviour that would surprise a reader). Never narrate what the code does; never restate the signature; never duplicate CLAUDE.md.
+- No inline `#` comments. For **public** modules, classes, methods, and functions: Google-style docstrings are required (ruff `D` enforces this — see the Linting section). The Args/Returns/Raises sections necessarily restate the signature; that's the point — they feed `inspect.getdoc()` for autogen. For **private** code (underscore-prefixed) and **tests**: docstrings only when the why is non-obvious. Never duplicate CLAUDE.md.
 - No banner-style separators (`# --- Section ---`). If a file needs sections it should be split.
 - Comment / docstring rules apply to source AND tests. Rename the test, don't comment it.
 - No comments referring to history (`# ported from gtd`, `# matches Y implementation`).
@@ -157,10 +157,10 @@ If a particular query pattern shows up repeatedly in caller code, abstract it *i
 
 ```toml
 dependencies = ["pyyaml>=6.0"]
-dev = ["pytest>=8.0", "ruff>=0.5"]
+dev = ["pytest>=8.0", "ruff>=0.5", "pre-commit>=3.0", "tomli>=2.0"]
 ```
 
-stdlib `sqlite3`, `subprocess` (for git), `pathlib`, `uuid`, `hashlib`, `os`, `shutil`. No GitPython, no Pydantic, no MCP SDK, no mypy, no pytest-cov.
+stdlib `sqlite3`, `subprocess` (for git), `pathlib`, `uuid`, `hashlib`, `os`. No GitPython, no Pydantic, no MCP SDK, no mypy, no pytest-cov. The dev extras (`pre-commit`, `tomli`) support the CI / version-check workflow under `.github/` and `.pre-commit-config.yaml`.
 
 ## Tests
 

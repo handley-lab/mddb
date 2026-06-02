@@ -12,7 +12,8 @@ license = { text = "MIT" }
 authors = [
     {name = "Handley Research Group", email = "wh260@cam.ac.uk"}
 ]
-keywords = ["knowledge", "agents", "mcp", "yaml", "markdown", "substrate"]
+keywords = ["knowledge", "agents", "yaml", "markdown", "substrate"]
+dependencies = ["pyyaml>=6.0"]
 classifiers = [
     "Development Status :: 1 - Planning",
     "Intended Audience :: Developers",
@@ -23,6 +24,9 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Libraries",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.5"]
 
 [project.urls]
 Homepage = "https://github.com/handley-lab/mddb"

@@ -87,6 +87,8 @@ id: <uuid-v4>
 
 `id` is required. Substrate generates UUIDv4 on create if absent. YAML is loaded via `yaml.safe_load` (PyYAML defaults). Bare ISO dates parse as `datetime.date`; if you want date strings for lexicographic comparison, quote them in the source YAML.
 
+Two PyYAML default overrides on the write path (`yaml.safe_dump(data, sort_keys=False, allow_unicode=True)`): `sort_keys=False` so cards retain the field order the caller wrote (alphabetised output reorders frontmatter on every update, which is jarring in git diffs); `allow_unicode=True` so international characters aren't escaped into `\\uXXXX` sequences in the on-disk YAML.
+
 ### Directories and slugs
 
 The substrate has no opinion about directory structure or slugs. `create(relpath=None)` writes to `<path>/<id>.md` (UUID-flat). `create(relpath="inventory/fridge.md")` writes to exactly that path. The caller decides; no inference from `yaml["doctype"]` or `yaml["title"]`. `move(card_id, new_relpath, rationale=...)` renames in place (`git mv` + index update); the id stays the same so history follows.

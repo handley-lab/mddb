@@ -50,9 +50,7 @@ def rebuild_index(root: Path) -> sqlite3.Connection:
             if ".git" in md_path.relative_to(root).parts:
                 continue
             card = Card.from_file(md_path)
-            yaml_text = yaml.safe_dump(
-                card.yaml, sort_keys=False, allow_unicode=True, default_flow_style=False
-            )
+            yaml_text = yaml.safe_dump(card.yaml, sort_keys=False, allow_unicode=True)
             cur = conn.execute(
                 "INSERT INTO entries(id, relpath, yaml_text, body) VALUES (?, ?, ?, ?)",
                 (card.id, str(md_path.relative_to(root)), yaml_text, card.body),

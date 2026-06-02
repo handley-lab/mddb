@@ -29,7 +29,5 @@ class Card:
         return cls(yaml=fm, body=body)
 
     def __str__(self) -> str:
-        fm = yaml.safe_dump(
-            self.yaml, sort_keys=False, allow_unicode=True, default_flow_style=False
-        )
+        fm = yaml.safe_dump(self.yaml, sort_keys=False, allow_unicode=True)
         return f"---\n{fm}---\n{self.body}"

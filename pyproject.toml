@@ -35,3 +35,6 @@ Issues = "https://github.com/handley-lab/mddb/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+mddb = ["*.sql"]

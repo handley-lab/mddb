@@ -33,7 +33,7 @@ These rules bound this codebase. They are themselves bound by lean code — don'
 - Files are truth; SQLite is a derived cache at `~/.cache/mddb/<sha1(abs-path)>/index.sqlite`; git records rationale/history.
 - Core substrate has no domain fields beyond `id`. Flat YAML.
 - Mutation order: filesystem → git → SQLite. If the SQLite step fails, unlink the cache; the next `MDDB(path)` rebuilds it.
-- Subprocess git via `subprocess.run(["git", ...], check=True)`. No GitPython, no libgit2.
+- Subprocess git via `subprocess.run(["git", ...], check=True)`. No GitPython (it's itself a subprocess wrapper — adds API cost without value). No libgit2 (gtd dropped it after fighting it). If bulk operations ever bottleneck, dulwich (pure-Python git) is the leanest alternative — not another wrapper.
 - No MCP, no CLI, no GUI in the prototype.
 
 ## Architecture

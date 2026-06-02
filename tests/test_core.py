@@ -101,7 +101,7 @@ def test_cache_rebuild(db):
         rationale="testing cache rebuild — initial card before cache deletion",
     )
     root = db.root
-    from mddb._index import cache_path
+    from mddb.index import cache_path
 
     db.conn.close()
     cache_path(root).unlink()

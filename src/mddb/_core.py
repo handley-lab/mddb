@@ -1,3 +1,5 @@
+"""The :class:`MDDB` class: filesystem + git + SQLite orchestration for the public verbs."""
+
 from __future__ import annotations
 
 import os
@@ -8,7 +10,7 @@ from pathlib import Path
 
 import yaml as pyyaml
 
-from . import _index
+from . import index
 from .card import Card
 
 
@@ -35,7 +37,7 @@ class MDDB:
             self.root.mkdir(parents=True, exist_ok=True)
             self._init_git()
             print(f"mddb: initialised new mddb at {self.root}", file=sys.stderr)
-        self.conn = _index.open_index(self.root)
+        self.conn = index.open_index(self.root)
 
     def create(
         self, yaml: dict, body: str = "", *, relpath: str | None = None, rationale: str
@@ -91,7 +93,7 @@ class MDDB:
                     card.body,
                 ),
             )
-            _index.index_fields(self.conn, cur.lastrowid, card.yaml)
+            index.index_fields(self.conn, cur.lastrowid, card.yaml)
         return card
 
     def read(self, card_id: str) -> Card:
@@ -159,7 +161,7 @@ class MDDB:
             self.conn.execute(
                 "DELETE FROM entry_fields WHERE entry_rowid = ?", (rowid,)
             )
-            _index.index_fields(self.conn, rowid, card.yaml)
+            index.index_fields(self.conn, rowid, card.yaml)
         return card
 
     def delete(self, card_id: str, *, rationale: str) -> None:
@@ -264,12 +266,12 @@ class MDDB:
 
     def _write_atomic(self, target: Path, text: str) -> None:
         tmp = target.with_suffix(target.suffix + f".{uuid.uuid4().hex}.tmp")
-        tmp.write_text(text, encoding="utf-8")
+        tmp.write_text(text)
         os.replace(tmp, target)
 
     def _init_git(self) -> None:
         subprocess.run(["git", "init", "-q", "-b", "master"], cwd=self.root, check=True)
-        (self.root / ".gitignore").write_text("*.tmp\n", encoding="utf-8")
+        (self.root / ".gitignore").write_text("*.tmp\n")
         self._git("add", "--", ".gitignore")
         self._git("commit", "-m", "initial commit")
 

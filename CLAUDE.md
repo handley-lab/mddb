@@ -178,7 +178,9 @@ ruff format
 ruff check
 ```
 
-`ruff` config lives in `pyproject.toml` with defaults — don't override without a reason.
+`ruff` is configured in `pyproject.toml` with **one deliberate override**: the `D` (pydocstyle) rule set with `convention = "google"`. Public modules, classes, methods, and functions must carry a Google-style docstring so `inspect.getdoc()`-based autogeneration (e.g. LLM tool schemas) has parseable Args / Returns / Raises. Underscore-private modules (`_core.py`), tests, and scripts are exempt via `per-file-ignores`.
+
+Other ruff defaults are left alone.
 
 ## Footguns
 

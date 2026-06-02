@@ -29,4 +29,4 @@ def _git_config(key):
 
 @pytest.fixture
 def db(tmp_path):
-    return mddb.MDDB(tmp_path / "vault")
+    return mddb.MDDB(tmp_path)

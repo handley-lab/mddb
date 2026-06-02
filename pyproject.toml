@@ -28,6 +28,17 @@ classifiers = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.5", "pre-commit>=3.0", "tomli>=2.0"]
 
+[tool.ruff.lint]
+extend-select = ["D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"src/mddb/_*.py" = ["D"]
+"tests/*" = ["D"]
+"scripts/*" = ["D"]
+
 [project.urls]
 Homepage = "https://github.com/handley-lab/mddb"
 Repository = "https://github.com/handley-lab/mddb"

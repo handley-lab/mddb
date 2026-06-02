@@ -10,7 +10,7 @@ First consumer: `alan` working in a persistent Python REPL. `import mddb; db = m
 
 These rules bound this codebase. They are themselves bound by lean code — don't apply them to absurdity.
 
-- **Compose, don't wrap.** This is the load-bearing principle. The library exists to give an LLM agent (and a human) versatile composable machinery — not to hand them a curated UX. Alan writes Python. Alan writes SQL. The substrate exposes `self.conn` directly rather than wrapping it in a filter DSL; YAML round-trips through PyYAML's defaults rather than a custom loader; `history()` returns `list[dict]` rather than a `Commit` class; mutation verbs return real `Card` objects you can mutate and pass back. Every helper that intermediates between Alan and the raw primitive is a thing that can get in his way the next time he needs to do something we didn't pre-imagine. When in doubt, expose the primitive; let the caller compose.
+- **Compose, don't wrap.** This is the load-bearing principle. The library exists to give an LLM agent (and a human) versatile composable machinery — not to hand them a curated UX. Alan writes Python. Alan writes SQL. The substrate exposes `self.conn` directly rather than wrapping it in a filter DSL; YAML loads via PyYAML's defaults; `history()` returns `list[dict]` rather than a `Commit` class; mutation verbs return real `Card` objects you can mutate and pass back. Every helper that intermediates between Alan and the raw primitive is a thing that can get in his way the next time he needs to do something we didn't pre-imagine. When in doubt, expose the primitive; let the caller compose.
 
 - **Lean code wins ties.** Minimum lines, minimum dependencies, minimum abstraction. Three similar lines beat one premature abstraction. Audit for dead code regularly.
 
@@ -32,7 +32,7 @@ These rules bound this codebase. They are themselves bound by lean code — don'
 
 - Files are truth; SQLite is a derived cache at `~/.cache/mddb/<sha1(abs-path)>/index.sqlite`; git records rationale/history.
 - Core substrate has no domain fields beyond `id`. Flat YAML.
-- Mutation order: filesystem → git → SQLite. If the SQLite step fails, unlink the cache; the next `MDDB(path)` rebuilds it.
+- Mutation order: filesystem → git → SQLite. SQLite failures propagate; the cache may be left stale. Delete the cache file manually if you want a fresh one.
 - Subprocess git via `subprocess.run(["git", ...], check=True)`. No GitPython (it's itself a subprocess wrapper — adds API cost without value). No libgit2 (gtd dropped it after fighting it). If bulk operations ever bottleneck, dulwich (pure-Python git) is the leanest alternative — not another wrapper.
 - No MCP, no CLI, no GUI in the prototype.
 
@@ -61,9 +61,9 @@ class MDDB:
     def read(self, card_id: str) -> Card: ...
     def update(self, card: Card, *, rationale: str) -> Card: ...
     def delete(self, card_id: str, *, rationale: str) -> None: ...
-    def search(self, query: str, *, filter: dict | None = None, limit: int = 50) -> list[Card]: ...
-    def list(self, filter: dict | None = None, limit: int = 500) -> list[Card]: ...
-    def history(self, card_id: str) -> list[Commit]: ...
+    def move(self, card_id: str, new_relpath: str, *, rationale: str) -> None: ...
+    def history(self, card_id: str) -> list[dict]: ...
+    conn: sqlite3.Connection  # exposed; write SQL against the schema below
 
 class Card:
     yaml: dict
@@ -85,11 +85,11 @@ id: <uuid-v4>
 <markdown body>
 ```
 
-`id` is required. Substrate generates UUIDv4 on create if absent. YAML is loaded by a CSafeLoader subclass with the implicit timestamp resolver removed — bare `2026-06-02` stays a string, lexicographically sortable. Otherwise PyYAML defaults.
+`id` is required. Substrate generates UUIDv4 on create if absent. YAML is loaded via `yaml.safe_load` (PyYAML defaults). Bare ISO dates parse as `datetime.date`; if you want date strings for lexicographic comparison, quote them in the source YAML.
 
 ### Directories and slugs
 
-The substrate has no opinion about directory structure or slugs. `create(relpath=None)` writes to `<path>/<id>.md` (UUID-flat). `create(relpath="inventory/fridge.md")` writes to exactly that path. The caller decides; no inference from `yaml["doctype"]` or `yaml["title"]`. No `rename` verb — to move a card, `delete` + `create` with a new relpath. The id changes; rationales narrate the why.
+The substrate has no opinion about directory structure or slugs. `create(relpath=None)` writes to `<path>/<id>.md` (UUID-flat). `create(relpath="inventory/fridge.md")` writes to exactly that path. The caller decides; no inference from `yaml["doctype"]` or `yaml["title"]`. `move(card_id, new_relpath, rationale=...)` renames in place (`git mv` + index update); the id stays the same so history follows.
 
 ### Mutation flow
 
@@ -111,15 +111,28 @@ CREATE VIRTUAL TABLE entries_fts USING fts5(yaml_text, body, content='entries', 
 
 SQLite default journal mode (single-writer). FTS sync via the standard external-content triggers (AI / AD / AU with the `'delete'` row idiom). `entries.body` and `entries.yaml_text` duplicate disk content for FTS; reads always go to disk.
 
-### Filter
+### Querying
+
+There is no `search` / `list` / `compile_filter`. The substrate exposes `db.conn` and the schema; callers compose SQL directly. Examples:
 
 ```python
-{"field": "<top-level-key>", "op": "eq|ne|lt|le|gt|ge|in|contains|like", "value": ...}
-{"fts": "<query>"}
-{"and": [...]}  {"or": [...]}  {"not": ...}
+# full-text
+ids = [r[0] for r in db.conn.execute(
+    "SELECT id FROM entries WHERE rowid IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ?)",
+    ("wheelbarrow",),
+)]
+
+# field filter
+ids = [r[0] for r in db.conn.execute(
+    "SELECT entries.id FROM entries JOIN entry_fields f ON f.entry_rowid = entries.rowid "
+    "WHERE f.key = ? AND f.value_str = ?",
+    ("tags", "shed"),
+)]
+
+cards = [db.read(i) for i in ids]
 ```
 
-Top-level keys only. `compile_filter` is a pure function returning `(sql_where, params)`. Unknown op names crash.
+If a particular query pattern shows up repeatedly in caller code, abstract it *in the caller*, not in the substrate.
 
 ## Style
 

@@ -11,22 +11,22 @@ def test_create_read(db):
 
 
 def test_update(db):
-    card = db.create({"location": "shed"}, body="a", rationale="initial")
+    card = db.create({"location": "shed"}, body="a", rationale="testing update — initial shed location")
     card.yaml["location"] = "barn"
-    db.update(card, rationale="moved")
+    db.update(card, rationale="testing update — moved shed contents to barn")
     assert db.read(card.id).yaml["location"] == "barn"
 
 
 def test_delete(db):
-    card = db.create({"x": 1}, rationale="initial")
-    db.delete(card.id, rationale="removed")
+    card = db.create({"x": 1}, rationale="testing delete — created so we can remove")
+    db.delete(card.id, rationale="testing delete — verifying removal makes read raise")
     with pytest.raises(KeyError):
         db.read(card.id)
 
 
 def test_move_keeps_id(db):
-    card = db.create({"x": 1}, body="contents", rationale="initial")
-    db.move(card.id, "moved/here.md", rationale="reorganised")
+    card = db.create({"x": 1}, body="contents", rationale="testing move — initial flat layout")
+    db.move(card.id, "moved/here.md", rationale="testing move — reorganised into subfolder")
     again = db.read(card.id)
     assert again.id == card.id
     assert again.body == "contents"
@@ -43,8 +43,8 @@ def test_fts_via_conn(db):
 
 
 def test_field_filter_via_conn(db):
-    a = db.create({"tags": ["shed"]}, rationale="a")
-    db.create({"tags": ["fridge"]}, rationale="b")
+    a = db.create({"tags": ["shed"]}, rationale="testing field filter — shed card should match")
+    db.create({"tags": ["fridge"]}, rationale="testing field filter — fridge card should not match")
     rows = db.conn.execute(
         "SELECT entries.id FROM entries JOIN entry_fields ON entry_fields.entry_rowid = entries.rowid "
         "WHERE entry_fields.key = ? AND entry_fields.value_str = ?",
@@ -67,7 +67,7 @@ def test_relpath(db):
 
 
 def test_cache_rebuild(db):
-    card = db.create({"x": 1}, body="hello", rationale="initial")
+    card = db.create({"x": 1}, body="hello", rationale="testing cache rebuild — initial card before cache deletion")
     root = db.root
     from mddb._index import cache_path
     db.conn.close()

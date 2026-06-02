@@ -6,8 +6,8 @@ is :class:`MDDB` and :class:`Card`; ``db.conn`` is the live SQLite connection
 for callers who want to compose SQL directly.
 """
 
-from ._core import MDDB
+from ._core import MDDB, Transaction
 from .card import Card
 
-__version__ = "0.0.2"
-__all__ = ["MDDB", "Card"]
+__version__ = "0.0.3"
+__all__ = ["MDDB", "Card", "Transaction"]

@@ -6,12 +6,25 @@ import os
 import subprocess
 import sys
 import uuid
+from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml as pyyaml
 
 from . import index
 from .card import Card, slugify
+
+
+@dataclass
+class _Staged:
+    card: Card | None
+    original_relpath: str | None
+    relpath: str | None
+
+
+def _copy(card: Card) -> Card:
+    return Card(yaml=deepcopy(card.yaml), body=card.body)
 
 
 def _resolve_relpath(relpath: str | None, title: str) -> str:
@@ -56,6 +69,7 @@ class MDDB:
             self._init_git()
             print(f"mddb: initialised new mddb at {self.root}", file=sys.stderr)
         self.conn = index.open_index(self.root)
+        self._active_tx: Transaction | None = None
 
     def create(
         self,
@@ -99,6 +113,10 @@ class MDDB:
             subprocess.CalledProcessError: ``git add`` or ``git commit``
                 failed.
         """
+        if self._active_tx is not None:
+            raise RuntimeError(
+                "cannot use base MDDB.create while a transaction is active; use tx.create instead"
+            )
         yaml = dict(yaml or {})
         yaml["title"] = title
         yaml["summary"] = summary
@@ -182,6 +200,10 @@ class MDDB:
             subprocess.CalledProcessError: ``git add`` or ``git commit``
                 failed.
         """
+        if self._active_tx is not None:
+            raise RuntimeError(
+                "cannot use base MDDB.update while a transaction is active; use tx.update instead"
+            )
         card.yaml["summary"] = summary
         relpath = self._relpath(card.id)
         self._write_atomic(self.root / relpath, str(card))
@@ -221,6 +243,10 @@ class MDDB:
             subprocess.CalledProcessError: ``git rm`` or ``git commit``
                 failed.
         """
+        if self._active_tx is not None:
+            raise RuntimeError(
+                "cannot use base MDDB.delete while a transaction is active; use tx.delete instead"
+            )
         relpath = self._relpath(card_id)
         self._git("rm", "--", relpath)
         self._git("commit", "-m", rationale)
@@ -246,6 +272,10 @@ class MDDB:
             subprocess.CalledProcessError: ``git mv`` or ``git commit``
                 failed (e.g. target path already exists).
         """
+        if self._active_tx is not None:
+            raise RuntimeError(
+                "cannot use base MDDB.move while a transaction is active; use tx.move instead"
+            )
         old = self._relpath(card_id)
         self._validate_relpath(new_relpath)
         (self.root / new_relpath).parent.mkdir(parents=True, exist_ok=True)
@@ -319,6 +349,10 @@ class MDDB:
             )
         return commits
 
+    def transaction(self, *, rationale: str) -> Transaction:
+        """Open a batching context manager. See :class:`Transaction`."""
+        return Transaction(self, rationale)
+
     def _relpath(self, card_id: str) -> str:
         row = self.conn.execute(
             "SELECT relpath FROM entries WHERE id = ?", (card_id,)
@@ -349,3 +383,113 @@ class MDDB:
         p = Path(relpath)
         if p.is_absolute() or ".." in p.parts:
             raise ValueError(f"invalid relpath: {relpath}")
+
+
+class Transaction:
+    """Buffer create/read/update/delete/move operations and materialise them as one commit on clean exit.
+
+    Construct via :meth:`MDDB.transaction`. Operations are staged in memory
+    until the ``with`` block exits cleanly; on body exception, nothing is
+    written. On clean exit with a non-empty buffer, the entire batch is
+    materialised as a single git commit and a single SQLite transaction.
+
+    A ``Transaction`` is single-shot — after ``__exit__`` (clean or not),
+    further verb calls and re-entry both raise ``RuntimeError``.
+    """
+
+    def __init__(self, db: MDDB, rationale: str):
+        self._db = db
+        self._rationale = rationale
+        self._staged: dict[str, _Staged] = {}
+        self._relpaths: dict[str, str] = {}
+        self._closed = False
+
+    def __enter__(self) -> Transaction:
+        if self._closed:
+            raise RuntimeError("transaction already closed")
+        if self._db._active_tx is not None:
+            raise RuntimeError("nested transactions are not supported")
+        self._db._active_tx = self
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        try:
+            if exc_type is None and self._staged:
+                self._commit()
+        finally:
+            self._db._active_tx = None
+            self._closed = True
+
+    def create(
+        self,
+        *,
+        title: str,
+        summary: str,
+        yaml: dict | None = None,
+        body: str = "",
+        relpath: str | None = None,
+    ) -> Card:
+        """Stage a new card for creation. Materialises on clean ``__exit__``."""
+        if self._closed:
+            raise RuntimeError("transaction already closed")
+        yaml_d = dict(yaml or {})
+        yaml_d["title"] = title
+        yaml_d["summary"] = summary
+        if "id" not in yaml_d:
+            yaml_d["id"] = str(uuid.uuid4())
+        new_card = Card(yaml=yaml_d, body=body)
+        resolved = _resolve_relpath(relpath, title)
+        self._db._validate_relpath(resolved)
+        new_id = new_card.id
+        if new_id in self._staged:
+            raise RuntimeError(f"duplicate id in transaction: {new_id}")
+        row = self._db.conn.execute(
+            "SELECT 1 FROM entries WHERE id = ?", (new_id,)
+        ).fetchone()
+        if row is not None:
+            raise RuntimeError(f"id already exists: {new_id}")
+        if resolved in self._relpaths:
+            raise FileExistsError(resolved)
+        if (self._db.root / resolved).exists() and not self._staged_delete_at(resolved):
+            raise FileExistsError(resolved)
+        self._staged[new_id] = _Staged(
+            card=new_card, original_relpath=None, relpath=resolved
+        )
+        self._relpaths[resolved] = new_id
+        return _copy(new_card)
+
+    def _staged_delete_at(self, path: str) -> bool:
+        return any(
+            s.original_relpath == path and s.card is None and s.relpath is None
+            for s in self._staged.values()
+        )
+
+    def _commit(self) -> None:
+        for staged in self._staged.values():
+            if staged.card is not None and staged.relpath is not None:
+                target = self._db.root / staged.relpath
+                target.parent.mkdir(parents=True, exist_ok=True)
+                self._db._write_atomic(target, str(staged.card))
+                self._db._git("add", "--", staged.relpath)
+        self._db._git("commit", "-m", self._rationale)
+        with self._db.conn:
+            for staged in self._staged.values():
+                if (
+                    staged.card is not None
+                    and staged.original_relpath is None
+                    and staged.relpath is not None
+                ):
+                    cur = self._db.conn.execute(
+                        "INSERT INTO entries(id, relpath, yaml_text, body) VALUES (?, ?, ?, ?)",
+                        (
+                            staged.card.id,
+                            staged.relpath,
+                            pyyaml.safe_dump(
+                                staged.card.yaml, sort_keys=False, allow_unicode=True
+                            ),
+                            staged.card.body,
+                        ),
+                    )
+                    index.index_fields(
+                        self._db.conn, cur.lastrowid, staged.card.yaml
+                    )

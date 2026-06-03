@@ -900,3 +900,37 @@ def test_index_skips_title_summary_in_entry_fields(db, seed):
         (card.id,),
     ).fetchall()
     assert tag_rows == [("tags",)]
+
+
+def test_editor_create_rejects_path_escape(db):
+    with db.editor(rationale="reject create path escape") as editor:
+        with pytest.raises(ValueError, match="relative and canonical"):
+            editor.create(title="A", summary="A", relpath="../escape.md")
+
+
+def test_editor_move_rejects_path_escape(db, seed):
+    card = seed(title="A", summary="A", relpath="orig.md")
+    with db.editor(rationale="reject move path escape") as editor:
+        with pytest.raises(ValueError, match="relative and canonical"):
+            editor.move(card.id, "../escape.md")
+
+
+def test_editor_create_rejects_non_canonical_relpath(db):
+    with db.editor(rationale="reject non-canonical create") as editor:
+        with pytest.raises(ValueError, match="relative and canonical"):
+            editor.create(title="A", summary="A", relpath="sub/../card.md")
+
+
+def test_editor_move_rejects_non_canonical_relpath(db, seed):
+    card = seed(title="A", summary="A", relpath="orig.md")
+    with db.editor(rationale="reject non-canonical move") as editor:
+        with pytest.raises(ValueError, match="relative and canonical"):
+            editor.move(card.id, "./moved.md")
+
+
+def test_editor_create_rejects_in_root_symlink_alias(db):
+    (db.root / "real").mkdir()
+    (db.root / "link").symlink_to(db.root / "real")
+    with db.editor(rationale="reject in-root symlink alias") as editor:
+        with pytest.raises(ValueError, match="relative and canonical"):
+            editor.create(title="A", summary="A", relpath="link/card.md")

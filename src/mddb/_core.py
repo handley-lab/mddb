@@ -140,6 +140,24 @@ class MDDB:
         )
 
 
+def _validate_in_root(root: Path, relpath: str) -> None:
+    """Reject relpaths that the cache rebuild cannot reproduce.
+
+    Three checks (in order): non-canonical text (absolute or ``.``/``..``
+    parts), resolved location outside ``root``, or in-root symlink alias
+    whose resolved relative path differs from the textual relpath.
+    """
+    path = Path(relpath)
+    if path.is_absolute() or any(part in (".", "..") for part in path.parts):
+        raise ValueError(f"relpath must be relative and canonical: {relpath}")
+    root_resolved = root.resolve()
+    resolved = (root / relpath).resolve()
+    if not resolved.is_relative_to(root_resolved):
+        raise ValueError(f"relpath escapes root: {relpath}")
+    if str(resolved.relative_to(root_resolved)) != relpath:
+        raise ValueError(f"relpath must be relative and canonical: {relpath}")
+
+
 @dataclass
 class _Create:
     card: Card
@@ -299,6 +317,7 @@ class _Editor:
             if relpath.endswith(".md")
             else os.path.join(relpath, f"{slugify(title)}.md")
         )
+        _validate_in_root(self._db.root, resolved)
         if new_card.id in self._staged:
             raise RuntimeError(f"duplicate id in editor: {new_card.id}")
         if self._claim_for(resolved) is not None:
@@ -457,6 +476,7 @@ class _Editor:
             raise RuntimeError("editor already closed")
         if not new_relpath.endswith(".md"):
             raise ValueError(f"relpath must end in .md: {new_relpath}")
+        _validate_in_root(self._db.root, new_relpath)
         staged = self._staged.get(card_id)
         if isinstance(staged, _Delete):
             raise KeyError(card_id)

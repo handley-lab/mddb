@@ -336,5 +336,6 @@ Other ruff defaults are left alone.
 
 - `id` is immutable.
 - `relpath` must not collide.
+- `relpath` must be relative, canonical (no `.` or `..` path parts), inside the mddb root after symlink resolution, AND textually equal to its resolved relative path (no symlink aliases). Validated at `create` and `move`; other operations preserve the existing relpath. Violations raise `ValueError` — the substrate refuses to store a relpath the cache rebuild can't reproduce.
 - SQLite is disposable; `.md` files and git are truth.
 - Concurrent writers from another process are outside the prototype contract.

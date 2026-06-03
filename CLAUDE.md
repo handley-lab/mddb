@@ -12,9 +12,13 @@ These rules bound this codebase. They are themselves bound by lean code — don'
 
 - **Compose, don't wrap.** This is the load-bearing principle. The library exists to give an LLM agent (and a human) versatile composable machinery — not to hand them a curated UX. Alan writes Python. Alan writes SQL. The substrate exposes `self.conn` directly rather than wrapping it in a filter DSL; YAML loads via PyYAML's defaults; `history()` returns `list[dict]` rather than a `Commit` class; mutation verbs return real `Card` objects you can mutate and pass back. Every helper that intermediates between Alan and the raw primitive is a thing that can get in his way the next time he needs to do something we didn't pre-imagine. When in doubt, expose the primitive; let the caller compose.
 
-- **Lean code wins ties.** Minimum lines, minimum dependencies, minimum abstraction. Three similar lines beat one premature abstraction. Audit for dead code regularly.
+  *Corollary — sugar undermines its own existence.* If a safer primitive is the only path for a real failure mode (e.g. transactional batching to prevent half-committed loops), don't expose a simpler one-shot sugar alongside it. Callers reach for the sugar, the failure mode reappears, and the safer primitive is dead weight. The bare `MDDB.create/update/delete/move` verbs were removed for exactly this reason: `db.edit()` is the only mutation primitive, full stop.
+
+- **Lean code wins ties.** Minimum lines, minimum dependencies, minimum abstraction. Three similar lines beat one premature abstraction. Audit for dead code regularly. Single-caller helpers especially must earn their name; if `_init_git` or `_write_atomic` is called from one place, inline it.
 
 - **No defensive programming.** Trust internal code. Never `try; except: pass`. Never `dict.get(key)` to paper over a key the rest of the code assumes is there. Never `or []` to substitute a fallback. If a caller passes something the function doesn't handle, the function crashes with the natural exception and the caller fixes it. The native Python traceback is the error UI.
+
+  *And it bites downstream.* A defensive precondition check forces every legitimate code path to satisfy it, including your own helpers. Removing the `.git` existence check from `MDDB.__init__` was what let `MDDB.init()` construct the instance first and use `self._git` for all four bootstrap commands instead of bare `subprocess.run`. Defensive checks create chicken-and-egg constraints that force you to break your own abstractions to work around them.
 
 - **Crash on drift.** When code parses a value (a config key, a YAML field your layer wrote, a filter dict op name), enumerate the known cases and crash on anything else. No `default` branches, no silent fallthrough. This applies to values your code parses; it does not licence validating every aspect of every persisted object.
 
@@ -27,6 +31,12 @@ These rules bound this codebase. They are themselves bound by lean code — don'
 - **Iterative reviews have a stopping rule.** When a review escalates into deeper checks for drift that requires unusual operator behaviour to trigger, stop and call convergence. "Lean code" is a bound, not a soft preference; an APPROVED that adds 300 lines is worse than a NOT APPROVED at 200.
 
 - **Boundaries translate errors, don't hide them.** The only real boundary is the disk and git. If git fails, `subprocess.CalledProcessError` propagates. If SQLite fails, `sqlite3.Error` propagates. We don't catch these to retranslate them; the caller sees the native exception with the native traceback.
+
+- **Locality of schema knowledge.** Per-table SQL operations live in `_index.py` (next to the schema and `index_fields`), not scattered through `_core.py`. This isn't wrapping — there's no DSL, no class hierarchy, no validation; just named functions over a raw `sqlite3.Connection`. The `_core.py` orchestrator owns mutation ordering (filesystem → git → SQLite); `_index.py` owns "given conn and card/path, mutate cache tables." If you find yourself writing `conn.execute("INSERT INTO entries...")` outside `_index.py`, move it.
+
+- **Name primary APIs for action, not formality.** When a method is the only way to do a thing, the name should invite rather than warn. `db.edit()` instead of `db.transaction()`: the second sounds like banking ceremony with failure machinery; the first reads as the natural thing you're doing. Jargon belongs in internals (`_Edit` privately implements an atomic batch); the public surface uses verbs the caller already thinks in.
+
+- **Optional types should reflect real None states, not "I might not pass this kwarg."** `relpath: str = ""` beats `relpath: str | None = None` when the empty string already means "no relpath given." `Optional` is Python idiom, but it's only honest when `None` is semantically distinct from a sensible default value of the type. Reach for the default value first; reach for `| None` only when the None state is load-bearing (e.g. `_Staged.card` is `None` for move-only and delete records — real states the dataclass distinguishes).
 
 ## Design shape
 

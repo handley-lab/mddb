@@ -150,7 +150,6 @@ class _Edit:
         self._db = db
         self._rationale = rationale
         self._staged: dict[str, _Staged] = {}
-        self._relpaths: dict[str, str] = {}
         self._closed = False
 
     def __enter__(self) -> _Edit:
@@ -181,7 +180,7 @@ class _Edit:
         """Stage a new card for creation. Materialises on clean ``__exit__``."""
         if self._closed:
             raise RuntimeError("edit already closed")
-        yaml_d = dict(yaml or {})
+        yaml_d = {} if yaml is None else dict(yaml)
         yaml_d["title"] = title
         yaml_d["summary"] = summary
         if "id" not in yaml_d:
@@ -192,17 +191,15 @@ class _Edit:
             if relpath.endswith(".md")
             else os.path.join(relpath, f"{slugify(title)}.md")
         )
-        new_id = new_card.id
-        if new_id in self._staged:
-            raise RuntimeError(f"duplicate id in edit: {new_id}")
-        if resolved in self._relpaths:
+        if new_card.id in self._staged:
+            raise RuntimeError(f"duplicate id in edit: {new_card.id}")
+        if self._claim_for(resolved) is not None:
             raise FileExistsError(resolved)
         if (self._db.root / resolved).exists() and not self._staged_delete_at(resolved):
             raise FileExistsError(resolved)
-        self._staged[new_id] = _Staged(
+        self._staged[new_card.id] = _Staged(
             card=new_card, original_relpath=None, relpath=resolved
         )
-        self._relpaths[resolved] = new_id
         return new_card.copy()
 
     def read(self, card_id: str) -> Card:
@@ -223,19 +220,17 @@ class _Edit:
         if self._closed:
             raise RuntimeError("edit already closed")
         card.yaml["summary"] = summary
-        card_id = card.id
-        staged = self._staged.get(card_id)
+        staged = self._staged.get(card.id)
         if staged is not None and staged.card is None and staged.relpath is None:
-            raise KeyError(card_id)
+            raise KeyError(card.id)
         staged_card = card.copy()
         if staged is None:
-            original = _index.relpath_of(self._db.conn, card_id)
-            self._staged[card_id] = _Staged(
+            original = _index.relpath_of(self._db.conn, card.id)
+            self._staged[card.id] = _Staged(
                 card=staged_card, original_relpath=original, relpath=original
             )
-            self._relpaths[original] = card_id
         else:
-            self._staged[card_id] = _Staged(
+            self._staged[card.id] = _Staged(
                 card=staged_card,
                 original_relpath=staged.original_relpath,
                 relpath=staged.relpath,
@@ -251,25 +246,16 @@ class _Edit:
             raise KeyError(card_id)
         if staged is not None and staged.original_relpath is None:
             del self._staged[card_id]
-            if (
-                staged.relpath is not None
-                and self._relpaths.get(staged.relpath) == card_id
-            ):
-                del self._relpaths[staged.relpath]
             return
         if staged is not None:
-            if (
-                staged.relpath is not None
-                and self._relpaths.get(staged.relpath) == card_id
-            ):
-                del self._relpaths[staged.relpath]
             self._staged[card_id] = _Staged(
                 card=None, original_relpath=staged.original_relpath, relpath=None
             )
             return
-        original = _index.relpath_of(self._db.conn, card_id)
         self._staged[card_id] = _Staged(
-            card=None, original_relpath=original, relpath=None
+            card=None,
+            original_relpath=_index.relpath_of(self._db.conn, card_id),
+            relpath=None,
         )
 
     def move(self, card_id: str, new_relpath: str) -> None:
@@ -285,16 +271,16 @@ class _Edit:
             current = _index.relpath_of(self._db.conn, card_id)
         if new_relpath == current:
             return
-        owner = self._relpaths.get(new_relpath)
-        if owner is not None and owner != card_id:
+        if self._claim_for(new_relpath) is not None:
             raise FileExistsError(new_relpath)
         if (self._db.root / new_relpath).exists():
             if staged is None or staged.original_relpath != new_relpath:
                 raise FileExistsError(new_relpath)
         if staged is None:
-            original = _index.relpath_of(self._db.conn, card_id)
             new_record = _Staged(
-                card=None, original_relpath=original, relpath=new_relpath
+                card=None,
+                original_relpath=_index.relpath_of(self._db.conn, card_id),
+                relpath=new_relpath,
             )
         elif staged.original_relpath is None:
             new_record = _Staged(
@@ -306,8 +292,6 @@ class _Edit:
                 original_relpath=staged.original_relpath,
                 relpath=new_relpath,
             )
-        if current is not None and self._relpaths.get(current) == card_id:
-            del self._relpaths[current]
         if (
             new_record.card is None
             and new_record.original_relpath is not None
@@ -317,7 +301,12 @@ class _Edit:
                 del self._staged[card_id]
             return
         self._staged[card_id] = new_record
-        self._relpaths[new_relpath] = card_id
+
+    def _claim_for(self, relpath: str) -> str | None:
+        for card_id, s in self._staged.items():
+            if s.relpath == relpath:
+                return card_id
+        return None
 
     def _staged_delete_at(self, path: str) -> bool:
         return any(

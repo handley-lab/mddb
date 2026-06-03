@@ -131,7 +131,7 @@ Title drives the default file slug; directory is the caller's choice via `relpat
 
 So `relpath="inventory"` and `relpath="inventory/"` both produce `inventory/<slug>.md`. A caller who wants a custom filename types the `.md` explicitly. Slug generation uses `python-slugify`'s defaults.
 
-Title and directory are **orthogonal**: title is *what the card is*; directory is *where the caller chose to put it*. Title changes do not move the file — `editor.update()` rewrites in place. To rename the file, call `editor.move(card_id, new_relpath)` explicitly (`git mv` + index update; id stays the same so history follows). Collisions on the resolved relpath raise `FileExistsError`; the caller resolves by changing the title or passing an explicit `relpath`.
+Title and directory are **orthogonal**: title is *what the card is*; directory is *where the caller chose to put it*. Title changes do not move the file — `editor.update()` rewrites in place. To rename the file, call `editor.move(card_id, new_relpath)` explicitly (`git mv` + index update; id stays the same so history follows). `move` takes an exact `.md` filename — it does *not* apply suffix-decides (unlike `relpath=` on `create`); a non-`.md` target raises `ValueError` because the cache rebuild only indexes `*.md` files and would lose the card. Collisions on the resolved relpath raise `FileExistsError`; the caller resolves by changing the title or passing an explicit `relpath`.
 
 ### Tags
 

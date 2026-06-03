@@ -866,3 +866,11 @@ def test_editor_edit_matches_unicode_codepoints_exactly_not_canonical_forms(db, 
             editor.edit(card_nfd.id, nfc, "cafe")
     assert db.read(card_nfc.id).body == "a cafe b"
     assert db.read(card_nfd.id).body == f"a {nfd} b"
+
+
+def test_editor_move_requires_md_suffix(db, seed):
+    card = seed(title="A", summary="A", relpath="orig.md")
+    with db.editor(rationale="reject non-md move target") as editor:
+        with pytest.raises(ValueError, match="must end in .md"):
+            editor.move(card.id, "inventory/shed")
+    assert (db.root / "orig.md").exists()

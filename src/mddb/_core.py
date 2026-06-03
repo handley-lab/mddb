@@ -16,6 +16,17 @@ from .card import Card
 
 
 class MDDB:
+    """A YAML+markdown card substrate over a git directory + SQLite cache.
+
+    Attributes:
+        root: Absolute path to the mddb directory. Cards live here as ``.md``
+            files; git records rationale and history.
+        conn: Live ``sqlite3.Connection`` to the derived index at
+            ``~/.cache/mddb/<sha1(abs-path)>/index.sqlite``. Write SQL against
+            it directly — there is no query DSL. See ``CLAUDE.md`` for the
+            schema.
+    """
+
     def __init__(self, path: Path | str):
         """Open the mddb at ``path``. Use :meth:`init` to bootstrap a fresh one."""
         self.root = Path(path).expanduser().resolve()
@@ -165,7 +176,47 @@ class _Editor:
     def __exit__(self, exc_type, exc, tb) -> None:
         try:
             if exc_type is None and self._staged:
-                self._commit()
+                for staged in self._staged.values():
+                    if staged.card is None and staged.relpath is None:
+                        self._db._git("rm", "--", staged.original_relpath)
+                for staged in self._staged.values():
+                    if (
+                        staged.original_relpath is not None
+                        and staged.relpath is not None
+                        and staged.relpath != staged.original_relpath
+                    ):
+                        (self._db.root / staged.relpath).parent.mkdir(
+                            parents=True, exist_ok=True
+                        )
+                        self._db._git(
+                            "mv", "--", staged.original_relpath, staged.relpath
+                        )
+                for staged in self._staged.values():
+                    if staged.card is not None and staged.relpath is not None:
+                        target = self._db.root / staged.relpath
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        tmp = target.with_suffix(
+                            target.suffix + f".{uuid.uuid4().hex}.tmp"
+                        )
+                        tmp.write_text(str(staged.card))
+                        os.replace(tmp, target)
+                        self._db._git("add", "--", staged.relpath)
+                self._db._git("commit", "-m", self._rationale)
+                with self._db.conn:
+                    for card_id, staged in self._staged.items():
+                        if staged.card is None and staged.relpath is None:
+                            _index.delete(self._db.conn, card_id)
+                        elif staged.original_relpath is None:
+                            _index.insert(self._db.conn, staged.card, staged.relpath)
+                        elif staged.card is None:
+                            _index.update_relpath(
+                                self._db.conn, card_id, staged.relpath
+                            )
+                        else:
+                            _index.update_relpath(
+                                self._db.conn, card_id, staged.relpath
+                            )
+                            _index.update_content(self._db.conn, staged.card)
         finally:
             self._db._active_editor = None
             self._closed = True
@@ -229,7 +280,10 @@ class _Editor:
             raise RuntimeError(f"duplicate id in editor: {new_card.id}")
         if self._claim_for(resolved) is not None:
             raise FileExistsError(resolved)
-        if (self._db.root / resolved).exists() and not self._staged_delete_at(resolved):
+        if (self._db.root / resolved).exists() and not any(
+            s.original_relpath == resolved and s.card is None and s.relpath is None
+            for s in self._staged.values()
+        ):
             raise FileExistsError(resolved)
         self._staged[new_card.id] = _Staged(
             card=new_card, original_relpath=None, relpath=resolved
@@ -367,9 +421,17 @@ class _Editor:
         )
 
     def move(self, card_id: str, new_relpath: str) -> None:
-        """Stage a relpath change for ``card_id``."""
+        """Stage a relpath change for ``card_id``.
+
+        ``new_relpath`` must end in ``.md`` — the cache rebuild only indexes
+        ``*.md`` files, so a non-``.md`` target would silently disappear from
+        the cache on the next rebuild. ``move`` does not apply suffix-decides
+        (unlike ``relpath=`` on ``create``); callers pass an exact filename.
+        """
         if self._closed:
             raise RuntimeError("editor already closed")
+        if not new_relpath.endswith(".md"):
+            raise ValueError(f"relpath must end in .md: {new_relpath}")
         staged = self._staged.get(card_id)
         if staged is not None and staged.card is None and staged.relpath is None:
             raise KeyError(card_id)
@@ -415,44 +477,3 @@ class _Editor:
             if s.relpath == relpath:
                 return card_id
         return None
-
-    def _staged_delete_at(self, path: str) -> bool:
-        return any(
-            s.original_relpath == path and s.card is None and s.relpath is None
-            for s in self._staged.values()
-        )
-
-    def _commit(self) -> None:
-        for staged in self._staged.values():
-            if staged.card is None and staged.relpath is None:
-                self._db._git("rm", "--", staged.original_relpath)
-        for staged in self._staged.values():
-            if (
-                staged.original_relpath is not None
-                and staged.relpath is not None
-                and staged.relpath != staged.original_relpath
-            ):
-                (self._db.root / staged.relpath).parent.mkdir(
-                    parents=True, exist_ok=True
-                )
-                self._db._git("mv", "--", staged.original_relpath, staged.relpath)
-        for staged in self._staged.values():
-            if staged.card is not None and staged.relpath is not None:
-                target = self._db.root / staged.relpath
-                target.parent.mkdir(parents=True, exist_ok=True)
-                tmp = target.with_suffix(target.suffix + f".{uuid.uuid4().hex}.tmp")
-                tmp.write_text(str(staged.card))
-                os.replace(tmp, target)
-                self._db._git("add", "--", staged.relpath)
-        self._db._git("commit", "-m", self._rationale)
-        with self._db.conn:
-            for card_id, staged in self._staged.items():
-                if staged.card is None and staged.relpath is None:
-                    _index.delete(self._db.conn, card_id)
-                elif staged.original_relpath is None:
-                    _index.insert(self._db.conn, staged.card, staged.relpath)
-                elif staged.card is None:
-                    _index.update_relpath(self._db.conn, card_id, staged.relpath)
-                else:
-                    _index.update_relpath(self._db.conn, card_id, staged.relpath)
-                    _index.update_content(self._db.conn, staged.card)

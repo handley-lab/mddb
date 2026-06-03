@@ -134,6 +134,24 @@ class MDDB:
         """
         return _Editor(self, rationale)
 
+    def sidecar_relpaths(self, card_id: str) -> list[str]:
+        """Return relpaths of git-tracked stem-paired non-``.md`` sidecars.
+
+        Discovery rule matches the substrate's lifecycle phases (move/delete):
+        a sidecar is a git-tracked file in the same directory as the card
+        whose name starts with ``<card_stem>.`` and whose suffix is not
+        ``.md``. Same-stem ``.md`` siblings (e.g. ``notes.extra.md`` next to
+        ``notes.md``) are other cards, not sidecars.
+
+        Returns:
+            Relpaths in sorted order; empty list for cards with no payload.
+
+        Raises:
+            KeyError: ``card_id`` is not in the index.
+        """
+        relpath = _index.relpath_of(self.conn, card_id)
+        return _sidecar_siblings(self, relpath)
+
     def _git(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             ["git", *args], cwd=self.root, check=True, capture_output=True, text=True
@@ -158,10 +176,71 @@ def _validate_in_root(root: Path, relpath: str) -> None:
         raise ValueError(f"relpath must be relative and canonical: {relpath}")
 
 
+def _sidecar_at(card_relpath: str, ext: str) -> str:
+    """Return the sidecar relpath for a card relpath + extension.
+
+    ``ext`` must start with ``.`` (caller's responsibility — `create` validates).
+    Uses ``with_name(stem + ext)`` rather than ``with_suffix(ext)`` so multi-part
+    ``ext`` strings work for discovery-derived extensions on the move target.
+    """
+    card_path = Path(card_relpath)
+    return str(card_path.with_name(card_path.stem + ext))
+
+
+def _ext_of(card_relpath: str, sidecar_relpath: str) -> str:
+    """Return the extension portion of a sidecar relpath after its card-stem.
+
+    Takes the card relpath because ``Path.stem`` strips only the last suffix
+    and gives the wrong stem for dotted card filenames (e.g. card
+    ``papers/2025.return.md`` has ``Path.stem == "2025.return"``; the sidecar
+    ``papers/2025.return.pdf`` has extension ``.pdf``, not ``.return.pdf``).
+    """
+    card_stem = Path(card_relpath).stem
+    name = Path(sidecar_relpath).name
+    if not name.startswith(f"{card_stem}."):
+        raise ValueError(
+            f"sidecar {sidecar_relpath!r} doesn't share stem of card {card_relpath!r}"
+        )
+    return name[len(card_stem) :]
+
+
+def _sidecar_siblings(db: MDDB, card_relpath: str) -> list[str]:
+    """Return relpaths of git-tracked stem-paired non-``.md`` siblings.
+
+    For a card at X/Y.md, returns relpaths of git-tracked files in X/ (same
+    directory only, not recursive) whose basename starts with ``Y.`` AND
+    whose suffix is not ``.md``. Same-stem ``.md`` siblings (e.g.
+    X/Y.extra.md) are other cards, not sidecars, so they're excluded.
+    Untracked filesystem files are not included; the caller must
+    ``git add`` a manual sidecar to make it travel.
+    """
+    card_path = Path(card_relpath)
+    card_parent = card_path.parent
+    stem = card_path.stem
+    prefix = f"{stem}."
+    ls_args = ["ls-files", "-z", "--"]
+    if str(card_parent) != ".":
+        ls_args.append(f"{card_parent}/")
+    out = db._git(*ls_args).stdout
+    tracked = [p for p in out.split("\x00") if p]
+    siblings = []
+    for path in tracked:
+        path_obj = Path(path)
+        if path_obj.parent != card_parent:
+            continue
+        if path_obj.suffix == ".md":
+            continue
+        if not path_obj.name.startswith(prefix):
+            continue
+        siblings.append(path)
+    return sorted(siblings)
+
+
 @dataclass
 class _Create:
     card: Card
     relpath: str
+    sidecar: tuple[bytes, str] | None = None
 
 
 @dataclass
@@ -254,6 +333,17 @@ class _Editor:
                 os.replace(tmp, target)
                 self._db._git("add", "--", staged.relpath)
                 touched.add(staged.relpath)
+                if isinstance(staged, _Create) and staged.sidecar is not None:
+                    sidecar_bytes, ext = staged.sidecar
+                    sidecar_relpath = _sidecar_at(staged.relpath, ext)
+                    sidecar_target = self._db.root / sidecar_relpath
+                    sidecar_tmp = sidecar_target.with_suffix(
+                        sidecar_target.suffix + f".{uuid.uuid4().hex}.tmp"
+                    )
+                    sidecar_tmp.write_bytes(sidecar_bytes)
+                    os.replace(sidecar_tmp, sidecar_target)
+                    self._db._git("add", "--", sidecar_relpath)
+                    touched.add(sidecar_relpath)
         self._db._git("commit", "-m", self._rationale, "--", *sorted(touched))
         with self._db.conn:
             for card_id, staged in self._staged.items():
@@ -278,6 +368,8 @@ class _Editor:
         body: str = "",
         relpath: str = "",
         tags: Sequence[str] | None = None,
+        payload: Path | bytes | None = None,
+        payload_ext: str = "",
     ) -> Card:
         """Stage a new card for creation. Materialises on clean ``__exit__``.
 
@@ -296,6 +388,16 @@ class _Editor:
         Required kwargs (``title``, ``summary``) win over any matching keys
         in ``yaml=``. ``id`` from ``yaml=`` is preserved verbatim (any
         value); a UUIDv4 is generated only when ``id`` is absent.
+
+        ``payload`` (optional): bytes or a ``Path`` to a source file. When
+        given, the substrate writes a sidecar binary alongside the card at
+        ``<card_stem>.<payload_ext>``. Same commit, same editor batch.
+
+        ``payload_ext`` (optional): extension for the sidecar. Resolution
+        order: non-empty wins; else derived from ``payload.suffix`` if
+        ``payload`` is a ``Path`` with exactly one suffix. Multi-part
+        suffixes (e.g. ``.tar.gz``) are rejected — use ``.tgz``/``.tbz`` or
+        an explicit single-suffix ``payload_ext``.
         """
         if self._closed:
             raise RuntimeError("editor already closed")
@@ -325,6 +427,51 @@ class _Editor:
             else os.path.join(relpath, f"{slugify(title)}.md")
         )
         _validate_in_root(self._db.root, resolved)
+        sidecar: tuple[bytes, str] | None = None
+        if payload is not None:
+            if payload_ext:
+                ext = payload_ext if payload_ext.startswith(".") else f".{payload_ext}"
+            elif isinstance(payload, Path) and len(payload.suffixes) == 1:
+                ext = payload.suffix
+            elif isinstance(payload, Path) and len(payload.suffixes) > 1:
+                raise ValueError(
+                    f"payload Path has multi-part suffix {payload.suffixes!r}; "
+                    f"pass an explicit single-suffix payload_ext (e.g. '.tgz') instead"
+                )
+            else:
+                raise ValueError(
+                    "payload bytes require payload_ext, or payload Path must have a single-suffix name"
+                )
+            if "." in ext[1:]:
+                raise ValueError("payload_ext must be a single suffix")
+            if ext == ".md":
+                raise ValueError("payload_ext cannot be .md")
+            sidecar_relpath = _sidecar_at(resolved, ext)
+            _validate_in_root(self._db.root, sidecar_relpath)
+            deleted_sidecars: set[str] = set()
+            for s in self._staged.values():
+                if isinstance(s, _Delete):
+                    deleted_sidecars.update(
+                        _sidecar_siblings(self._db, s.original_relpath)
+                    )
+            if (self._db.root / sidecar_relpath).exists() and (
+                sidecar_relpath not in deleted_sidecars
+            ):
+                raise FileExistsError(sidecar_relpath)
+            for s in self._staged.values():
+                if (
+                    isinstance(s, (_Create, _Update, _Move))
+                    and s.relpath == sidecar_relpath
+                ):
+                    raise FileExistsError(sidecar_relpath)
+                if isinstance(s, _Create) and s.sidecar is not None:
+                    if _sidecar_at(s.relpath, s.sidecar[1]) == sidecar_relpath:
+                        raise FileExistsError(sidecar_relpath)
+            if isinstance(payload, Path):
+                payload_bytes = payload.read_bytes()
+            else:
+                payload_bytes = bytes(payload)
+            sidecar = (payload_bytes, ext)
         if new_card.id in self._staged:
             raise RuntimeError(f"duplicate id in editor: {new_card.id}")
         if self._claim_for(resolved) is not None:
@@ -334,7 +481,9 @@ class _Editor:
             for s in self._staged.values()
         ):
             raise FileExistsError(resolved)
-        self._staged[new_card.id] = _Create(card=new_card, relpath=resolved)
+        self._staged[new_card.id] = _Create(
+            card=new_card, relpath=resolved, sidecar=sidecar
+        )
         return new_card.copy()
 
     def read(self, card_id: str) -> Card:
@@ -441,7 +590,9 @@ class _Editor:
                 card=staged_card, original_relpath=original, relpath=original
             )
         elif isinstance(staged, _Create):
-            self._staged[card.id] = _Create(card=staged_card, relpath=staged.relpath)
+            self._staged[card.id] = _Create(
+                card=staged_card, relpath=staged.relpath, sidecar=staged.sidecar
+            )
         elif isinstance(staged, (_Update, _Move)):
             self._staged[card.id] = _Update(
                 card=staged_card,
@@ -514,7 +665,9 @@ class _Editor:
             )
             return
         if isinstance(staged, _Create):
-            self._staged[card_id] = _Create(card=staged.card, relpath=new_relpath)
+            self._staged[card_id] = _Create(
+                card=staged.card, relpath=new_relpath, sidecar=staged.sidecar
+            )
             return
         if isinstance(staged, _Update):
             self._staged[card_id] = _Update(

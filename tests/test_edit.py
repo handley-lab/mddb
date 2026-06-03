@@ -947,3 +947,152 @@ def test_editor_commit_does_not_sweep_unrelated_staged_changes(db):
     assert committed == {"a.md"}
     status = db._git("status", "--porcelain").stdout
     assert "A  unrelated.txt" in status
+
+
+def test_editor_create_with_path_payload(db, tmp_path):
+    source = tmp_path / "src.pdf"
+    source.write_bytes(b"%PDF-fake")
+    with db.editor(rationale="path payload") as editor:
+        editor.create(title="A", summary="A", relpath="papers/a.md", payload=source)
+    assert (db.root / "papers/a.md").exists()
+    assert (db.root / "papers/a.pdf").exists()
+    assert (db.root / "papers/a.pdf").read_bytes() == b"%PDF-fake"
+    tracked = db._git("ls-files", "--").stdout.split("\n")
+    assert "papers/a.md" in tracked
+    assert "papers/a.pdf" in tracked
+    out = db._git("show", "--name-only", "--pretty=format:", "HEAD").stdout
+    committed = {line.strip() for line in out.splitlines() if line.strip()}
+    assert committed == {"papers/a.md", "papers/a.pdf"}
+
+
+def test_editor_create_with_bytes_payload(db):
+    with db.editor(rationale="bytes payload") as editor:
+        editor.create(
+            title="A",
+            summary="A",
+            relpath="papers/a.md",
+            payload=b"\x00\x01\x02",
+            payload_ext=".bin",
+        )
+    assert (db.root / "papers/a.md").exists()
+    assert (db.root / "papers/a.bin").read_bytes() == b"\x00\x01\x02"
+
+
+def test_editor_create_payload_path_with_no_suffix_raises(db, tmp_path):
+    source = tmp_path / "noext"
+    source.write_bytes(b"x")
+    with db.editor(rationale="no suffix") as editor:
+        with pytest.raises(ValueError, match="single-suffix"):
+            editor.create(title="A", summary="A", relpath="a.md", payload=source)
+
+
+def test_editor_create_payload_path_with_multipart_suffix_raises(db, tmp_path):
+    source = tmp_path / "archive.tar.gz"
+    source.write_bytes(b"gz")
+    with db.editor(rationale="multi-part path") as editor:
+        with pytest.raises(ValueError, match="multi-part suffix"):
+            editor.create(title="A", summary="A", relpath="a.md", payload=source)
+    with db.editor(rationale="multi-part path with override") as editor:
+        editor.create(
+            title="B",
+            summary="B",
+            relpath="b.md",
+            payload=source,
+            payload_ext=".tgz",
+        )
+    assert (db.root / "b.tgz").read_bytes() == b"gz"
+
+
+def test_editor_create_payload_bytes_without_ext_raises(db):
+    with db.editor(rationale="bytes no ext") as editor:
+        with pytest.raises(ValueError, match="payload_ext"):
+            editor.create(title="A", summary="A", relpath="a.md", payload=b"x")
+
+
+def test_editor_create_payload_md_ext_raises(db):
+    with db.editor(rationale="md ext") as editor:
+        with pytest.raises(ValueError, match="cannot be .md"):
+            editor.create(
+                title="A", summary="A", relpath="a.md", payload=b"x", payload_ext=".md"
+            )
+
+
+def test_editor_create_payload_multipart_ext_raises(db):
+    with db.editor(rationale="multi-part ext") as editor:
+        with pytest.raises(ValueError, match="single suffix"):
+            editor.create(
+                title="A",
+                summary="A",
+                relpath="a.md",
+                payload=b"x",
+                payload_ext=".tar.gz",
+            )
+
+
+def test_editor_create_payload_sidecar_collision_raises(db, tmp_path):
+    (db.root / "a.pdf").write_text("existing")
+    db._git("add", "--", "a.pdf")
+    db._git("commit", "-q", "-m", "seed sidecar slot")
+    source = tmp_path / "new.pdf"
+    source.write_bytes(b"new")
+    with db.editor(rationale="sidecar collision") as editor:
+        with pytest.raises(FileExistsError):
+            editor.create(title="A", summary="A", relpath="a.md", payload=source)
+
+
+def test_editor_create_payload_path_source_read_eagerly(db, tmp_path):
+    source = tmp_path / "src.pdf"
+    source.write_bytes(b"original")
+    with db.editor(rationale="eager read") as editor:
+        editor.create(title="A", summary="A", relpath="a.md", payload=source)
+        source.write_bytes(b"MUTATED")
+    assert (db.root / "a.pdf").read_bytes() == b"original"
+
+
+def test_editor_create_payload_then_update_preserves_sidecar(db):
+    with db.editor(rationale="create then update") as editor:
+        card = editor.create(
+            title="A",
+            summary="A",
+            relpath="a.md",
+            payload=b"sidecar",
+            payload_ext=".pdf",
+        )
+        editor.update(card, summary="updated")
+    assert (db.root / "a.md").exists()
+    assert (db.root / "a.pdf").read_bytes() == b"sidecar"
+    assert db.read(card.id).summary == "updated"
+
+
+def test_mddb_sidecar_relpaths(db, tmp_path):
+    source = tmp_path / "src.pdf"
+    source.write_bytes(b"pdf-bytes")
+    with db.editor(rationale="seed blob") as editor:
+        blob_card = editor.create(
+            title="Blob", summary="Blob", relpath="papers/blob.md", payload=source
+        )
+    assert db.sidecar_relpaths(blob_card.id) == ["papers/blob.pdf"]
+
+    with db.editor(rationale="plain card") as editor:
+        plain = editor.create(title="Plain", summary="Plain", relpath="plain.md")
+    assert db.sidecar_relpaths(plain.id) == []
+
+    (db.root / "papers/blob.png").write_bytes(b"png-bytes")
+    db._git("add", "--", "papers/blob.png")
+    db._git("commit", "-q", "-m", "add a second tracked sibling")
+    assert db.sidecar_relpaths(blob_card.id) == [
+        "papers/blob.pdf",
+        "papers/blob.png",
+    ]
+
+    with db.editor(rationale="add extra .md sibling") as editor:
+        editor.create(
+            title="Notes extra", summary="extra", relpath="papers/blob.extra.md"
+        )
+    assert db.sidecar_relpaths(blob_card.id) == [
+        "papers/blob.pdf",
+        "papers/blob.png",
+    ]
+
+    with pytest.raises(KeyError):
+        db.sidecar_relpaths("nope")

@@ -176,50 +176,50 @@ class _Editor:
     def __exit__(self, exc_type, exc, tb) -> None:
         try:
             if exc_type is None and self._staged:
-                for staged in self._staged.values():
-                    if staged.card is None and staged.relpath is None:
-                        self._db._git("rm", "--", staged.original_relpath)
-                for staged in self._staged.values():
-                    if (
-                        staged.original_relpath is not None
-                        and staged.relpath is not None
-                        and staged.relpath != staged.original_relpath
-                    ):
-                        (self._db.root / staged.relpath).parent.mkdir(
-                            parents=True, exist_ok=True
-                        )
-                        self._db._git(
-                            "mv", "--", staged.original_relpath, staged.relpath
-                        )
-                for staged in self._staged.values():
-                    if staged.card is not None and staged.relpath is not None:
-                        target = self._db.root / staged.relpath
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        tmp = target.with_suffix(
-                            target.suffix + f".{uuid.uuid4().hex}.tmp"
-                        )
-                        tmp.write_text(str(staged.card))
-                        os.replace(tmp, target)
-                        self._db._git("add", "--", staged.relpath)
-                self._db._git("commit", "-m", self._rationale)
-                with self._db.conn:
-                    for card_id, staged in self._staged.items():
-                        if staged.card is None and staged.relpath is None:
-                            _index.delete(self._db.conn, card_id)
-                        elif staged.original_relpath is None:
-                            _index.insert(self._db.conn, staged.card, staged.relpath)
-                        elif staged.card is None:
-                            _index.update_relpath(
-                                self._db.conn, card_id, staged.relpath
-                            )
-                        else:
-                            _index.update_relpath(
-                                self._db.conn, card_id, staged.relpath
-                            )
-                            _index.update_content(self._db.conn, staged.card)
+                self._materialise()
         finally:
             self._db._active_editor = None
             self._closed = True
+
+    def _materialise(self) -> None:
+        """Apply the staged batch as one git commit + one SQLite transaction.
+
+        Phases: filesystem deletes → moves → writes/adds → git commit →
+        SQLite cache sync (insert/update/delete inside ``with self._db.conn:``).
+        """
+        for staged in self._staged.values():
+            if staged.card is None and staged.relpath is None:
+                self._db._git("rm", "--", staged.original_relpath)
+        for staged in self._staged.values():
+            if (
+                staged.original_relpath is not None
+                and staged.relpath is not None
+                and staged.relpath != staged.original_relpath
+            ):
+                (self._db.root / staged.relpath).parent.mkdir(
+                    parents=True, exist_ok=True
+                )
+                self._db._git("mv", "--", staged.original_relpath, staged.relpath)
+        for staged in self._staged.values():
+            if staged.card is not None and staged.relpath is not None:
+                target = self._db.root / staged.relpath
+                target.parent.mkdir(parents=True, exist_ok=True)
+                tmp = target.with_suffix(target.suffix + f".{uuid.uuid4().hex}.tmp")
+                tmp.write_text(str(staged.card))
+                os.replace(tmp, target)
+                self._db._git("add", "--", staged.relpath)
+        self._db._git("commit", "-m", self._rationale)
+        with self._db.conn:
+            for card_id, staged in self._staged.items():
+                if staged.card is None and staged.relpath is None:
+                    _index.delete(self._db.conn, card_id)
+                elif staged.original_relpath is None:
+                    _index.insert(self._db.conn, staged.card, staged.relpath)
+                elif staged.card is None:
+                    _index.update_relpath(self._db.conn, card_id, staged.relpath)
+                else:
+                    _index.update_relpath(self._db.conn, card_id, staged.relpath)
+                    _index.update_content(self._db.conn, staged.card)
 
     def create(
         self,

@@ -2,7 +2,7 @@
 
 A minimal YAML-frontmatter + markdown-body card substrate for agentic and human knowledge work.
 
-Cards live as `.md` files in a directory under git. A derived SQLite index at `~/.cache/mddb/` provides fast structured + full-text queries. Rationales live in commit messages. The substrate has no domain knowledge — flat YAML, with three privileged keys (`id`, `title`, `summary`) corresponding to the progressive-disclosure levels. Anything heavier is layer code or an agent reasoning in a REPL.
+Cards live as `.md` files in a directory under git. A derived SQLite index at `~/.cache/mddb/` provides fast structured + full-text queries. Rationales live in commit messages. The substrate has no domain knowledge — flat YAML. The substrate filing vocabulary is `id`, `title`, `summary`, `relpath`, and `tags` (structures the substrate provides; the names are user choice). Anything heavier is layer code or an agent reasoning in a REPL.
 
 ## Quickstart
 
@@ -15,7 +15,8 @@ with db.edit(rationale="bought today") as edit:
     card = edit.create(
         title="Shed inventory",
         summary="Tools and equipment kept in the shed.",
-        yaml={"tags": ["shed"], "location": "shed"},
+        tags=["shed"],
+        yaml={"location": "shed"},
         body="A wheelbarrow.",
     )
 

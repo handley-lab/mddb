@@ -2,7 +2,7 @@
 
 Guidance for Claude Code working in this repository.
 
-`mddb` is a Python library: a minimal YAML-frontmatter + markdown-body card substrate. Cards live as `.md` files in a directory under git; a SQLite index outside the directory (at `~/.cache/mddb/`) provides fast structured + full-text queries; rationales live in commit messages. The substrate has no domain knowledge — no `card_type`, no `status`, no `due`. The only privileged YAML keys are **`id`, `title`, and `summary`** (the three disclosure levels — see "Progressive disclosure" below). Anything heavier (inventories, GTD, anything else) is layer code or, more usually, Alan reasoning in his REPL.
+`mddb` is a Python library: a minimal YAML-frontmatter + markdown-body card substrate. Cards live as `.md` files in a directory under git; a SQLite index outside the directory (at `~/.cache/mddb/`) provides fast structured + full-text queries; rationales live in commit messages. The substrate has no domain knowledge — no `card_type`, no `status`, no `due`. The **substrate filing vocabulary** is `id`, `title`, `summary`, `relpath`, and `tags` — these are how the substrate identifies and slices cards (see the "Card format", "Directories and slugs", and "Tags" sections below for each one's semantics). Anything heavier (inventories, GTD, anything else) is layer code or, more usually, Alan reasoning in his REPL.
 
 First consumer: `alan` working in a persistent Python REPL. `import mddb; db = mddb.MDDB(path)` opens an existing deck; `mddb.MDDB.init(path)` bootstraps a fresh one. There is no MCP server. There is no CLI. There is no TUI. There is no validation boundary — Alan constructs the calls.
 
@@ -41,7 +41,7 @@ These rules bound this codebase. They are themselves bound by lean code — don'
 ## Design shape
 
 - Files are truth; SQLite is a derived cache at `~/.cache/mddb/<sha1(abs-path)>/index.sqlite`; git records rationale/history.
-- Core substrate has no domain fields. The only privileged YAML keys are `id`, `title`, and `summary` (the three progressive-disclosure levels). Flat YAML.
+- Core substrate has no domain fields. The substrate filing vocabulary is `id`, `title`, `summary`, `relpath`, and `tags` — structures the substrate provides; *names* (what `area/work` or `inventory` means) stay user-owned. Flat YAML.
 - Mutation order: filesystem → git → SQLite. SQLite failures propagate; the cache may be left stale. Delete the cache file manually if you want a fresh one.
 - Subprocess git via `subprocess.run(["git", ...], check=True)`. No GitPython (it's itself a subprocess wrapper — adds API cost without value). No libgit2 (gtd dropped it after fighting it). If bulk operations ever bottleneck, dulwich (pure-Python git) is the leanest alternative — not another wrapper.
 - No MCP, no CLI, no GUI in the prototype.
@@ -52,7 +52,7 @@ These rules bound this codebase. They are themselves bound by lean code — don'
 
 ```
 <path>/
-  <id>.md        cards (caller may opt into a richer relpath like inventory/fridge.md)
+  <slugify(title)>.md   cards at root by default; caller may opt into a richer relpath like inventory/fridge.md
   .git/
 ```
 
@@ -75,9 +75,11 @@ class MDDB:
 
 class _Edit:  # private; only reachable via the with-block from MDDB.edit
     def create(self, *, title: str, summary: str, yaml: dict | None = None,
-               body: str = "", relpath: str = "") -> Card: ...
+               body: str = "", relpath: str = "",
+               tags: Sequence[str] | None = None) -> Card: ...
     def read(self, card_id: str) -> Card: ...
-    def update(self, card: Card, *, summary: str) -> Card: ...
+    def update(self, card: Card, *, summary: str,
+               tags: Sequence[str] | None = None) -> Card: ...
     def delete(self, card_id: str) -> None: ...
     def move(self, card_id: str, new_relpath: str) -> None: ...
 
@@ -90,6 +92,8 @@ class Card:
     def title(self) -> str: return self.yaml["title"]
     @property
     def summary(self) -> str: return self.yaml["summary"]
+    @property
+    def tags(self) -> list: return self.yaml["tags"]  # raises if absent (normal for untagged cards)
 ```
 
 `MDDB(path)` opens the mddb at `path`; mutation operations fire native `subprocess.CalledProcessError` from git if there's no repo there. `MDDB.init(path)` bootstraps a fresh one (`mkdir -p`, `git init`, commits a `.gitignore` containing `*.tmp`). Two explicit entry points — no silent "create if missing." `Card` is composition, not a dict subclass: callers write `card.yaml["key"] = value` and `card.body = "..."`. Equality, pickling, and hashing follow ordinary attribute semantics.
@@ -105,7 +109,13 @@ id: <uuid-v4>
 <markdown body>
 ```
 
-`id`, `title`, and `summary` are the three substrate-privileged keys (see "Progressive disclosure" below). All three are present on every card created through the API: `tx.create(title=..., summary=..., ...)` requires the two disclosure kwargs and inserts them into the YAML, plus a UUIDv4 `id` if the caller didn't supply one. `tx.update(card, summary=...)` also requires `summary` so the caller must make a deliberate decision about disclosure currency at every mutation (pass the existing value to acknowledge it's still accurate, or pass a new one to re-summarise). `Card.id`/`Card.title`/`Card.summary` use direct dict access and raise `KeyError` only if a card from a different source (manual file write, gtd import) lacks them. `MDDB.list()` returns `None` for missing values via `LEFT JOIN` to keep incomplete cards visible during overviews. YAML is loaded via `yaml.safe_load` (PyYAML defaults). Bare ISO dates parse as `datetime.date`; if you want date strings for lexicographic comparison, quote them in the source YAML.
+`id`, `title`, and `summary` are the **disclosure trio** — the progressive-disclosure levels (see "Progressive disclosure" below). All three are present on every card created through the API: `edit.create(title=..., summary=..., ...)` requires the two disclosure kwargs and inserts them into the YAML, plus a UUIDv4 `id` if the caller didn't supply one. `edit.update(card, summary=...)` also requires `summary` so the caller must make a deliberate decision about disclosure currency at every mutation (pass the existing value to acknowledge it's still accurate, or pass a new one to re-summarise). `Card.id`/`Card.title`/`Card.summary` use direct dict access and raise `KeyError` only if a card from a different source (manual file write, external import) lacks them — a missing disclosure key signals drift.
+
+`tags` is also a substrate filing key but with **different absence semantics**: untagged cards routinely omit the `tags` key, so `Card.tags` raising `KeyError` is *normal* for untagged cards, not drift. Callers who treat tags as optional use `card.yaml.get("tags", [])`.
+
+`MDDB.list()` returns `None` for missing title/summary values via `LEFT JOIN` to keep incomplete cards visible during overviews. YAML is loaded via `yaml.safe_load` (PyYAML defaults). Bare ISO dates parse as `datetime.date`; if you want date strings for lexicographic comparison, quote them in the source YAML.
+
+On the write path, `_Edit.create` constructs YAML in **canonical key order**: `id`, `title`, `summary`, `tags` (when present), then the caller's remaining `yaml=` keys in their original relative order. The on-disk frontmatter is scannable: the first lines tell you what the card is. `_Edit.update` does NOT re-canonicalise existing YAML order (it preserves what's already on disk).
 
 Two PyYAML default overrides on the write path (`yaml.safe_dump(data, sort_keys=False, allow_unicode=True)`): `sort_keys=False` so cards retain the field order the caller wrote (alphabetised output reorders frontmatter on every update, which is jarring in git diffs); `allow_unicode=True` so international characters aren't escaped into `\\uXXXX` sequences in the on-disk YAML.
 
@@ -119,7 +129,35 @@ Title drives the default file slug; directory is the caller's choice via `relpat
 
 So `relpath="inventory"` and `relpath="inventory/"` both produce `inventory/<slug>.md`. A caller who wants a custom filename types the `.md` explicitly. Slug generation uses `python-slugify`'s defaults.
 
-Title and directory are **orthogonal**: title is *what the card is*; directory is *where the caller chose to put it*. Title changes do not move the file — `tx.update()` rewrites in place. To rename the file, call `tx.move(card_id, new_relpath)` explicitly (`git mv` + index update; id stays the same so history follows). Collisions on the resolved relpath raise `FileExistsError`; the caller resolves by changing the title or passing an explicit `relpath`.
+Title and directory are **orthogonal**: title is *what the card is*; directory is *where the caller chose to put it*. Title changes do not move the file — `edit.update()` rewrites in place. To rename the file, call `edit.move(card_id, new_relpath)` explicitly (`git mv` + index update; id stays the same so history follows). Collisions on the resolved relpath raise `FileExistsError`; the caller resolves by changing the title or passing an explicit `relpath`.
+
+### Tags
+
+`tags` is a YAML list of strings: `tags: ["area/work", "topic/cosmology"]`. The substrate stores tags as flat strings and indexes them via `entry_fields`; **hierarchy via `/` is convention only** — the substrate doesn't know what `area/work` "means," only that it's a string.
+
+The library-and-card-catalogue analogy: `relpath` is the shelves (one location per book); `tags` is the card catalogue (multiple cross-refs per book). Both are filing structure the substrate provides. The names (`inventory/kitchen`, `area/work`) are user-owned domain choices.
+
+`Card.tags` is direct access (`self.yaml["tags"]`) — raises `KeyError` for untagged cards. Use `card.yaml.get("tags", [])` if absence should be treated as the empty list at the call site.
+
+`_Edit.create` and `_Edit.update` accept a three-state `tags: Sequence[str] | None = None` kwarg:
+
+- `tags=None` (default): no override. On `create`, the caller's `yaml["tags"]` is preserved if present. On `update`, `card.yaml["tags"]` is left as-is (in-place mutations the caller made before calling `update` persist).
+- `tags=()` / `tags=[]` (empty sequence): explicit clear. On `create`, no `tags` key on disk even if `yaml={"tags": [...]}` was passed. On `update`, the `tags` key is removed from `card.yaml`.
+- `tags=["x", "y"]` (non-empty): replace.
+
+The "omit empty" rule applies to the `tags=` kwarg only — raw `yaml={"tags": []}` is preserved verbatim (substrate doesn't normalise raw YAML input).
+
+Hierarchical queries are caller-composed via the existing `entry_fields` index. Descendants:
+
+```python
+db.conn.execute(
+    "SELECT entries.id FROM entries JOIN entry_fields f "
+    "ON f.entry_rowid = entries.rowid "
+    "WHERE f.key = 'tags' AND f.value_str LIKE 'area/%'",
+)
+```
+
+Self plus descendants: `f.value_str = 'area' OR f.value_str LIKE 'area/%'`. Substring: `f.value_str LIKE '%work%'`. Shell-style: `f.value_str GLOB 'area/*'`. Regex via SQLite's `REGEXP` operator is available if the caller registers a function on `db.conn` themselves (one line: `conn.create_function("regexp", 2, lambda p, v: bool(re.search(p, v)))`) — substrate doesn't preinstall, matching the compose-don't-wrap stance.
 
 ### Mutation flow
 
@@ -216,7 +254,7 @@ card.body        # markdown
 card.yaml        # full dict
 ```
 
-`id`, `title`, and `summary` are the three privileged YAML keys (substrate-level). Any other field (e.g. `tags`, `due`, `location`) is layer-defined and reached via raw SQL through `entry_fields`.
+`id`, `title`, `summary`, `relpath`, and `tags` are substrate filing keys (privileged at the substrate level). Any other field (e.g. `due`, `status`, `card_type`, `location`) is layer-defined and reached via raw SQL through `entry_fields`.
 
 ## Style
 
@@ -238,7 +276,7 @@ card.yaml        # full dict
 ## Dependencies
 
 ```toml
-dependencies = ["pyyaml>=6.0"]
+dependencies = ["pyyaml>=6.0", "python-slugify>=8.0"]
 dev = ["pytest>=8.0", "ruff>=0.5", "pre-commit>=3.0", "tomli>=2.0"]
 ```
 

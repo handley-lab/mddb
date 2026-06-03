@@ -20,7 +20,7 @@ class MDDB:
         """Open the mddb at ``path``. Use :meth:`init` to bootstrap a fresh one."""
         self.root = Path(path).expanduser().resolve()
         self.conn = _index.open_index(self.root)
-        self._active_edit: _Edit | None = None
+        self._active_editor: _Editor | None = None
 
     @classmethod
     def init(cls, path: Path | str) -> MDDB:
@@ -43,7 +43,8 @@ class MDDB:
 
         Resolves the card's relpath via the index, then loads the file
         directly (the SQLite copy is not used for reads). Mutate the
-        returned card and pass it to :meth:`update` to persist changes.
+        returned card and pass it to :meth:`_Editor.update` (inside a
+        :meth:`editor` block) to persist changes.
 
         Args:
             card_id: The card's ``id`` (the value at ``yaml["id"]``).
@@ -75,7 +76,7 @@ class MDDB:
     def history(self, card_id: str) -> list[dict]:
         """Return the commit history of a card, newest first.
 
-        Uses ``git log --follow`` so commits from before any :meth:`move`
+        Uses ``git log --follow`` so commits from before any ``editor.move(...)``
         are included.
 
         Args:
@@ -113,14 +114,14 @@ class MDDB:
             )
         return commits
 
-    def edit(self, *, rationale: str) -> _Edit:
+    def editor(self, *, rationale: str) -> _Editor:
         """Open a context manager for a batch of mutations.
 
-        The returned object's `create`/`read`/`update`/`delete`/`move`
+        The returned object's ``create``/``read``/``update``/``delete``/``move``/``edit``
         methods are buffered until the ``with`` block exits cleanly, then
         materialised as one git commit + one SQLite transaction.
         """
-        return _Edit(self, rationale)
+        return _Editor(self, rationale)
 
     def _git(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -135,10 +136,10 @@ class _Staged:
     relpath: str | None
 
 
-class _Edit:
-    """Buffer create/read/update/delete/move and materialise them as one commit on clean exit.
+class _Editor:
+    """Buffer create/read/update/delete/move/edit and materialise them as one commit on clean exit.
 
-    Construct via :meth:`MDDB.edit`. Operations are staged in memory until
+    Construct via :meth:`MDDB.editor`. Operations are staged in memory until
     the ``with`` block exits cleanly; on body exception, nothing is written.
     On clean exit with a non-empty buffer, the entire batch is materialised
     as a single git commit and a single SQLite transaction.
@@ -153,12 +154,12 @@ class _Edit:
         self._staged: dict[str, _Staged] = {}
         self._closed = False
 
-    def __enter__(self) -> _Edit:
+    def __enter__(self) -> _Editor:
         if self._closed:
-            raise RuntimeError("edit already closed")
-        if self._db._active_edit is not None:
-            raise RuntimeError("nested edits are not supported")
-        self._db._active_edit = self
+            raise RuntimeError("editor already closed")
+        if self._db._active_editor is not None:
+            raise RuntimeError("nested editors are not supported")
+        self._db._active_editor = self
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -166,7 +167,7 @@ class _Edit:
             if exc_type is None and self._staged:
                 self._commit()
         finally:
-            self._db._active_edit = None
+            self._db._active_editor = None
             self._closed = True
 
     def create(
@@ -198,7 +199,7 @@ class _Edit:
         value); a UUIDv4 is generated only when ``id`` is absent.
         """
         if self._closed:
-            raise RuntimeError("edit already closed")
+            raise RuntimeError("editor already closed")
         caller_yaml = {} if yaml is None else dict(yaml)
         caller_yaml.pop("title", None)
         caller_yaml.pop("summary", None)
@@ -225,7 +226,7 @@ class _Edit:
             else os.path.join(relpath, f"{slugify(title)}.md")
         )
         if new_card.id in self._staged:
-            raise RuntimeError(f"duplicate id in edit: {new_card.id}")
+            raise RuntimeError(f"duplicate id in editor: {new_card.id}")
         if self._claim_for(resolved) is not None:
             raise FileExistsError(resolved)
         if (self._db.root / resolved).exists() and not self._staged_delete_at(resolved):
@@ -238,7 +239,7 @@ class _Edit:
     def read(self, card_id: str) -> Card:
         """Read a card with staged-state visibility."""
         if self._closed:
-            raise RuntimeError("edit already closed")
+            raise RuntimeError("editor already closed")
         staged = self._staged.get(card_id)
         if staged is not None:
             if staged.card is None and staged.relpath is None:
@@ -268,7 +269,7 @@ class _Edit:
         Does NOT re-canonicalise existing YAML key order.
         """
         if self._closed:
-            raise RuntimeError("edit already closed")
+            raise RuntimeError("editor already closed")
         card.yaml["summary"] = summary
         if tags is not None:
             if tags:
@@ -278,7 +279,60 @@ class _Edit:
         staged = self._staged.get(card.id)
         if staged is not None and staged.card is None and staged.relpath is None:
             raise KeyError(card.id)
+        self._stage_content_update(card)
+        return card.copy()
+
+    def edit(
+        self,
+        card_id: str,
+        old: str,
+        new: str,
+        *,
+        replace_all: bool = False,
+    ) -> int:
+        """Find/replace text in the card's body. Mirrors :func:`loop.edit`.
+
+        Body-only — preserves title, summary, tags, relpath, and body content
+        outside the match region. For structured updates use :meth:`update`.
+
+        Args:
+            card_id: The card's id.
+            old: Substring to find. Must be non-empty.
+            new: Replacement substring. May be empty (removes the match).
+            replace_all: If True, replace every occurrence; otherwise require
+                exactly one match.
+
+        Returns:
+            Number of replacements made (or matched, if ``old == new``).
+
+        Raises:
+            ValueError: ``old`` is empty; ``old`` not found in body; or
+                ``old`` occurs multiple times and ``replace_all`` is False
+                (unless ``old == new``, which short-circuits as a no-op).
+            KeyError: ``card_id`` is staged-deleted, or unknown.
+            RuntimeError: editor already closed.
+        """
+        if self._closed:
+            raise RuntimeError("editor already closed")
+        if not old:
+            raise ValueError("old must not be empty")
+        card = self.read(card_id)
+        count = card.body.count(old)
+        if count == 0:
+            raise ValueError(f"not found: {old!r}")
+        if old == new:
+            return count
+        if count > 1 and not replace_all:
+            raise ValueError(
+                f"not unique: {count} occurrences (pass replace_all=True to replace all)"
+            )
+        card.body = card.body.replace(old, new)
+        self._stage_content_update(card)
+        return count
+
+    def _stage_content_update(self, card: Card) -> None:
         staged_card = card.copy()
+        staged = self._staged.get(card.id)
         if staged is None:
             original = _index.relpath_of(self._db.conn, card.id)
             self._staged[card.id] = _Staged(
@@ -290,12 +344,11 @@ class _Edit:
                 original_relpath=staged.original_relpath,
                 relpath=staged.relpath,
             )
-        return card.copy()
 
     def delete(self, card_id: str) -> None:
         """Stage a delete of ``card_id``."""
         if self._closed:
-            raise RuntimeError("edit already closed")
+            raise RuntimeError("editor already closed")
         staged = self._staged.get(card_id)
         if staged is not None and staged.card is None and staged.relpath is None:
             raise KeyError(card_id)
@@ -316,7 +369,7 @@ class _Edit:
     def move(self, card_id: str, new_relpath: str) -> None:
         """Stage a relpath change for ``card_id``."""
         if self._closed:
-            raise RuntimeError("edit already closed")
+            raise RuntimeError("editor already closed")
         staged = self._staged.get(card_id)
         if staged is not None and staged.card is None and staged.relpath is None:
             raise KeyError(card_id)

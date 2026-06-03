@@ -17,12 +17,12 @@ class Card:
     """A markdown card: YAML frontmatter (as a dict) + markdown body (as a string).
 
     Mutate ``yaml`` or ``body`` in place and pass the card to
-    :meth:`MDDB.update` to persist.
+    :meth:`_Editor.update` (inside an :meth:`MDDB.editor` block) to persist.
 
     The substrate filing keys are ``id``, ``title``, ``summary``, and ``tags``.
     The :attr:`id`, :attr:`title`, :attr:`summary`, and :attr:`tags` properties
     access them directly and raise ``KeyError`` if missing. ``title`` and
-    ``summary`` are written by ``_Edit.create`` unconditionally — a missing
+    ``summary`` are written by ``editor.create`` unconditionally — a missing
     key signals drift. ``tags`` is optional — untagged cards routinely omit
     the key, so ``card.tags`` raising is a *normal* signal, not drift.
     Callers who treat tags as optional use ``card.yaml.get("tags", [])``.

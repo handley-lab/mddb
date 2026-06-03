@@ -1,3 +1,4 @@
+import pytest
 import yaml as pyyaml
 
 from mddb.card import Card
@@ -18,3 +19,20 @@ def test_roundtrip():
     parsed = Card.from_text(str(c))
     assert parsed.yaml == {"id": "x", "tags": ["a", "b"]}
     assert parsed.body == "hello\n"
+
+
+def test_card_tags_returns_list_when_present():
+    card = Card(yaml={"id": "x", "tags": ["area/work", "topic/cosmology"]})
+    assert card.tags == ["area/work", "topic/cosmology"]
+
+
+def test_card_tags_raises_keyerror_when_absent():
+    card = Card(yaml={"id": "x"})
+    with pytest.raises(KeyError):
+        _ = card.tags
+
+
+def test_card_tags_returns_mutable_backing_list():
+    card = Card(yaml={"id": "x", "tags": []})
+    card.tags.append("shed")
+    assert card.yaml["tags"] == ["shed"]

@@ -19,14 +19,18 @@ class Card:
     Mutate ``yaml`` or ``body`` in place and pass the card to
     :meth:`MDDB.update` to persist.
 
-    The three substrate-privileged YAML keys are ``id``, ``title``, and
-    ``summary`` (the progressive-disclosure levels). The :attr:`id`,
-    :attr:`title`, and :attr:`summary` properties access them directly and
-    raise ``KeyError`` if missing.
+    The substrate filing keys are ``id``, ``title``, ``summary``, and ``tags``.
+    The :attr:`id`, :attr:`title`, :attr:`summary`, and :attr:`tags` properties
+    access them directly and raise ``KeyError`` if missing. ``title`` and
+    ``summary`` are written by ``_Edit.create`` unconditionally — a missing
+    key signals drift. ``tags`` is optional — untagged cards routinely omit
+    the key, so ``card.tags`` raising is a *normal* signal, not drift.
+    Callers who treat tags as optional use ``card.yaml.get("tags", [])``.
 
     Attributes:
         yaml: Frontmatter as a Python dict. Must contain ``"id"``;
-            ``"title"`` and ``"summary"`` are strongly expected.
+            ``"title"`` and ``"summary"`` are strongly expected; ``"tags"``
+            may be absent.
         body: Markdown body text.
     """
 
@@ -40,13 +44,22 @@ class Card:
 
     @property
     def title(self) -> str:
-        """Return the card's title (substrate-privileged for progressive disclosure)."""
+        """Return the card's title (substrate filing key, progressive disclosure)."""
         return self.yaml["title"]
 
     @property
     def summary(self) -> str:
-        """Return the card's summary (substrate-privileged for progressive disclosure)."""
+        """Return the card's summary (substrate filing key, progressive disclosure)."""
         return self.yaml["summary"]
+
+    @property
+    def tags(self) -> list:
+        """Return the card's tags (substrate filing key).
+
+        Raises ``KeyError`` for untagged cards. Use ``card.yaml.get("tags", [])``
+        if absence should be treated as the empty list.
+        """
+        return self.yaml["tags"]
 
     def copy(self) -> Card:
         """Return a deep copy of this card.

@@ -9,34 +9,31 @@ Cards live as `.md` files in a directory under git. A derived SQLite index at `~
 ```python
 import mddb
 
-db = mddb.MDDB("~/my-mddb")
+db = mddb.MDDB.init("~/my-mddb")  # or mddb.MDDB(path) to open an existing one
 
-card = db.create(
-    title="Shed inventory",
-    summary="Tools and equipment kept in the shed.",
-    yaml={"tags": ["shed"], "location": "shed"},
-    body="A wheelbarrow.",
-    rationale="bought today",
-)
+with db.edit(rationale="bought today") as edit:
+    card = edit.create(
+        title="Shed inventory",
+        summary="Tools and equipment kept in the shed.",
+        yaml={"tags": ["shed"], "location": "shed"},
+        body="A wheelbarrow.",
+    )
 
 # read by id
 card = db.read(card.id)
 
 # mutate and write back
 card.yaml["location"] = "barn"
-db.update(
-    card,
-    summary="Tools and equipment, moved to the barn.",
-    rationale="moved to barn",
-)
+with db.edit(rationale="moved to barn") as edit:
+    edit.update(card, summary="Tools and equipment, moved to the barn.")
 ```
 
-Batch many mutations into one commit + one SQLite transaction. A body exception inside the `with` block discards the buffer; on-disk state is unchanged.
+`db.edit()` is the only mutation primitive. Batch many mutations into one commit + one SQLite transaction. A body exception inside the `with` block discards the buffer; on-disk state is unchanged.
 
 ```python
-with db.transaction(rationale="bulk import") as tx:
+with db.edit(rationale="bulk import") as edit:
     for item in ["fridge", "shed", "loft"]:
-        tx.create(title=item.title(), summary=f"contents of the {item}")
+        edit.create(title=item.title(), summary=f"contents of the {item}")
 
 # full-text via raw SQL — no DSL
 ids = [r[0] for r in db.conn.execute(

@@ -29,4 +29,14 @@ def _git_config(key):
 
 @pytest.fixture
 def db(tmp_path):
-    return mddb.MDDB(tmp_path)
+    return mddb.MDDB.init(tmp_path)
+
+
+@pytest.fixture
+def seed(db):
+    def _seed(**kwargs):
+        rationale = kwargs.pop("rationale", "seed")
+        with db.edit(rationale=rationale) as edit:
+            return edit.create(**kwargs)
+
+    return _seed

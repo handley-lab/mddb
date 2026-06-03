@@ -25,15 +25,15 @@ def test_update(db, seed):
         body="a",
     )
     card.yaml["location"] = "barn"
-    with db.edit(rationale="moved shed contents to barn") as edit:
-        edit.update(card, summary="Tools and equipment, moved to the barn.")
+    with db.editor(rationale="moved shed contents to barn") as editor:
+        editor.update(card, summary="Tools and equipment, moved to the barn.")
     assert db.read(card.id).yaml["location"] == "barn"
 
 
 def test_delete(db, seed):
     card = seed(title="Disposable", summary="A card created so we can verify delete.")
-    with db.edit(rationale="verifying removal makes read raise") as edit:
-        edit.delete(card.id)
+    with db.editor(rationale="verifying removal makes read raise") as editor:
+        editor.delete(card.id)
     with pytest.raises(KeyError):
         db.read(card.id)
 
@@ -44,8 +44,8 @@ def test_move_keeps_id(db, seed):
         summary="A card initially at the root.",
         body="contents",
     )
-    with db.edit(rationale="reorganised into subfolder") as edit:
-        edit.move(card.id, "moved/here.md")
+    with db.editor(rationale="reorganised into subfolder") as editor:
+        editor.move(card.id, "moved/here.md")
     again = db.read(card.id)
     assert again.id == card.id
     assert again.body == "contents"
@@ -85,8 +85,8 @@ def test_history(db, seed):
         rationale="initial commit message",
     )
     card.yaml["x"] = 2
-    with db.edit(rationale="bumped x") as edit:
-        edit.update(card, summary=card.summary)
+    with db.editor(rationale="bumped x") as editor:
+        editor.update(card, summary=card.summary)
     commits = db.history(card.id)
     assert [c["message"].strip() for c in commits] == [
         "bumped x",
@@ -157,6 +157,6 @@ def test_card_properties_raise_on_missing_keys():
         _ = card.summary
 
 
-def test_mddb_init_sets_active_edit_none(tmp_path):
+def test_mddb_init_sets_active_editor_none(tmp_path):
     new_db = mddb.MDDB.init(tmp_path)
-    assert new_db._active_edit is None
+    assert new_db._active_editor is None

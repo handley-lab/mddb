@@ -11,8 +11,8 @@ import mddb
 
 db = mddb.MDDB.init("~/my-mddb")  # or mddb.MDDB(path) to open an existing one
 
-with db.edit(rationale="bought today") as edit:
-    card = edit.create(
+with db.editor(rationale="bought today") as editor:
+    card = editor.create(
         title="Shed inventory",
         summary="Tools and equipment kept in the shed.",
         tags=["shed"],
@@ -25,16 +25,16 @@ card = db.read(card.id)
 
 # mutate and write back
 card.yaml["location"] = "barn"
-with db.edit(rationale="moved to barn") as edit:
-    edit.update(card, summary="Tools and equipment, moved to the barn.")
+with db.editor(rationale="moved to barn") as editor:
+    editor.update(card, summary="Tools and equipment, moved to the barn.")
 ```
 
-`db.edit()` is the only mutation primitive. Batch many mutations into one commit + one SQLite transaction. A body exception inside the `with` block discards the buffer; on-disk state is unchanged.
+`db.editor()` is the only mutation primitive. Batch many mutations into one commit + one SQLite transaction. A body exception inside the `with` block discards the buffer; on-disk state is unchanged.
 
 ```python
-with db.edit(rationale="bulk import") as edit:
+with db.editor(rationale="bulk import") as editor:
     for item in ["fridge", "shed", "loft"]:
-        edit.create(title=item.title(), summary=f"contents of the {item}")
+        editor.create(title=item.title(), summary=f"contents of the {item}")
 
 # full-text via raw SQL — no DSL
 ids = [r[0] for r in db.conn.execute(

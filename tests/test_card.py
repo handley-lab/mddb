@@ -36,3 +36,8 @@ def test_card_tags_returns_mutable_backing_list():
     card = Card(yaml={"id": "x", "tags": []})
     card.tags.append("shed")
     assert card.yaml["tags"] == ["shed"]
+
+
+def test_card_from_text_malformed_frontmatter_raises_valueerror():
+    with pytest.raises(ValueError, match="malformed frontmatter"):
+        Card.from_text("not a card")

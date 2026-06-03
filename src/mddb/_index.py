@@ -11,7 +11,7 @@ import yaml
 
 from .card import Card
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 _SCHEMA = (Path(__file__).parent / "schema.sql").read_text()
 
 
@@ -106,20 +106,35 @@ def relpath_of(conn: sqlite3.Connection, card_id: str) -> str:
 def insert(conn: sqlite3.Connection, card: Card, relpath: str) -> None:
     """Cache a new card. Caller must already have written the file + committed."""
     cur = conn.execute(
-        "INSERT INTO entries(id, relpath, yaml_text, body) VALUES (?, ?, ?, ?)",
-        (card.id, relpath, _yaml_text(card), card.body),
+        "INSERT INTO entries(id, relpath, title, summary, yaml_text, body) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            card.id,
+            relpath,
+            card.yaml.get("title"),
+            card.yaml.get("summary"),
+            _yaml_text(card),
+            card.body,
+        ),
     )
     index_fields(conn, cur.lastrowid, card.yaml)
 
 
 def update_content(conn: sqlite3.Connection, card: Card) -> None:
-    """Refresh yaml_text/body and rebuild entry_fields for ``card``."""
+    """Refresh title/summary/yaml_text/body and rebuild entry_fields for ``card``."""
     rowid = conn.execute(
         "SELECT rowid FROM entries WHERE id = ?", (card.id,)
     ).fetchone()[0]
     conn.execute(
-        "UPDATE entries SET yaml_text = ?, body = ? WHERE rowid = ?",
-        (_yaml_text(card), card.body, rowid),
+        "UPDATE entries SET title = ?, summary = ?, yaml_text = ?, body = ? "
+        "WHERE rowid = ?",
+        (
+            card.yaml.get("title"),
+            card.yaml.get("summary"),
+            _yaml_text(card),
+            card.body,
+            rowid,
+        ),
     )
     conn.execute("DELETE FROM entry_fields WHERE entry_rowid = ?", (rowid,))
     index_fields(conn, rowid, card.yaml)
@@ -137,11 +152,7 @@ def delete(conn: sqlite3.Connection, card_id: str) -> None:
 
 def list_progressive(conn: sqlite3.Connection) -> list[dict]:
     """Return ``[{id, title, summary}, ...]`` for every cached card."""
-    rows = conn.execute(
-        "SELECT entries.id, t.value_str, s.value_str FROM entries "
-        "LEFT JOIN entry_fields t ON t.entry_rowid = entries.rowid AND t.key = 'title' "
-        "LEFT JOIN entry_fields s ON s.entry_rowid = entries.rowid AND s.key = 'summary'"
-    ).fetchall()
+    rows = conn.execute("SELECT id, title, summary FROM entries").fetchall()
     return [
         {"id": cid, "title": title, "summary": summary} for cid, title, summary in rows
     ]
@@ -166,6 +177,8 @@ def index_fields(conn: sqlite3.Connection, rowid: int, data: dict) -> None:
     """
     rows = []
     for key, value in data.items():
+        if key in ("title", "summary"):
+            continue
         if isinstance(value, dict):
             continue
         if isinstance(value, list):

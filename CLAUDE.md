@@ -12,7 +12,7 @@ These rules bound this codebase. They are themselves bound by lean code — don'
 
 - **Compose, don't wrap.** This is the load-bearing principle. The library exists to give an LLM agent (and a human) versatile composable machinery — not to hand them a curated UX. Alan writes Python. Alan writes SQL. The substrate exposes `self.conn` directly rather than wrapping it in a filter DSL; YAML loads via PyYAML's defaults; `history()` returns `list[dict]` rather than a `Commit` class; mutation verbs return real `Card` objects you can mutate and pass back. Every helper that intermediates between Alan and the raw primitive is a thing that can get in his way the next time he needs to do something we didn't pre-imagine. When in doubt, expose the primitive; let the caller compose.
 
-  *Corollary — sugar undermines its own existence.* If a safer primitive is the only path for a real failure mode (e.g. transactional batching to prevent half-committed loops), don't expose a simpler one-shot sugar alongside it. Callers reach for the sugar, the failure mode reappears, and the safer primitive is dead weight. The bare `MDDB.create/update/delete/move` verbs were removed for exactly this reason: `db.edit()` is the only mutation primitive, full stop.
+  *Corollary — sugar undermines its own existence.* If a safer primitive is the only path for a real failure mode (e.g. transactional batching to prevent half-committed loops), don't expose a simpler one-shot sugar alongside it. Callers reach for the sugar, the failure mode reappears, and the safer primitive is dead weight. The bare `MDDB.create/update/delete/move` verbs were removed for exactly this reason: `db.editor(rationale=...)` is the only mutation-primitive *factory*, full stop. It returns a `_Editor` whose methods (`create`/`read`/`update`/`delete`/`move`/`edit`) are the operations. The doorway is noun-shaped (an `editor`); the operations on it are verb-shaped.
 
 - **Lean code wins ties.** Minimum lines, minimum dependencies, minimum abstraction. Three similar lines beat one premature abstraction. Audit for dead code regularly. Single-caller helpers especially must earn their name; if `_init_git` or `_write_atomic` is called from one place, inline it.
 
@@ -34,9 +34,9 @@ These rules bound this codebase. They are themselves bound by lean code — don'
 
 - **Locality of schema knowledge.** Per-table SQL operations live in `_index.py` (next to the schema and `index_fields`), not scattered through `_core.py`. This isn't wrapping — there's no DSL, no class hierarchy, no validation; just named functions over a raw `sqlite3.Connection`. The `_core.py` orchestrator owns mutation ordering (filesystem → git → SQLite); `_index.py` owns "given conn and card/path, mutate cache tables." If you find yourself writing `conn.execute("INSERT INTO entries...")` outside `_index.py`, move it.
 
-- **Name primary APIs for action, not formality.** When a method is the only way to do a thing, the name should invite rather than warn. `db.edit()` instead of `db.transaction()`: the second sounds like banking ceremony with failure machinery; the first reads as the natural thing you're doing. Jargon belongs in internals (`_Edit` privately implements an atomic batch); the public surface uses verbs the caller already thinks in.
+- **Name primary APIs for the thing the caller holds.** When a method returns a context manager whose methods are the operations, the *factory* names the object the caller binds (`editor = db.editor(...)`), and the *operations* on it are the verbs (`editor.create`, `editor.edit`, `editor.update`). `db.editor()` instead of `db.transaction()`: the second sounds like banking ceremony with failure machinery; the first reads as the natural thing — you ask for an editor, you get one. Jargon belongs in internals (`_Editor` privately implements an atomic batch); the public surface uses words the caller already thinks in. Verb-returns-noun is well established in Python (`tempfile.NamedTemporaryFile()`, `sqlite3.connect()` returning a `Connection`).
 
-- **Optional types should reflect real None states, not "I might not pass this kwarg."** `relpath: str = ""` beats `relpath: str | None = None` when the empty string already means "no relpath given." `Optional` is Python idiom, but it's only honest when `None` is semantically distinct from a sensible default value of the type. Reach for the default value first; reach for `| None` only when the None state is load-bearing (e.g. `_Staged.card` is `None` for move-only and delete records — real states the dataclass distinguishes).
+- **Optional types should reflect real None states, not "I might not pass this kwarg."** `relpath: str = ""` beats `relpath: str | None = None` when the empty string already means "no relpath given." `Optional` is Python idiom, but it's only honest when `None` is semantically distinct from a sensible default value of the type. Reach for the default value first; reach for `| None` only when the None state is load-bearing.
 
 ## Design shape
 
@@ -70,10 +70,10 @@ class MDDB:
     def read(self, card_id: str) -> Card: ...
     def list(self) -> list[dict]: ...  # [{id, title, summary}, ...] — progressive disclosure
     def history(self, card_id: str) -> list[dict]: ...
-    def edit(self, *, rationale: str) -> _Edit: ...
+    def editor(self, *, rationale: str) -> _Editor: ...
     conn: sqlite3.Connection  # exposed; write SQL against the schema below
 
-class _Edit:  # private; only reachable via the with-block from MDDB.edit
+class _Editor:  # private; only reachable via the with-block from MDDB.editor
     def create(self, *, title: str, summary: str, yaml: dict | None = None,
                body: str = "", relpath: str = "",
                tags: Sequence[str] | None = None) -> Card: ...
@@ -82,6 +82,8 @@ class _Edit:  # private; only reachable via the with-block from MDDB.edit
                tags: Sequence[str] | None = None) -> Card: ...
     def delete(self, card_id: str) -> None: ...
     def move(self, card_id: str, new_relpath: str) -> None: ...
+    def edit(self, card_id: str, old: str, new: str, *,
+             replace_all: bool = False) -> int: ...
 
 class Card:
     yaml: dict
@@ -109,13 +111,13 @@ id: <uuid-v4>
 <markdown body>
 ```
 
-`id`, `title`, and `summary` are the **disclosure trio** — the progressive-disclosure levels (see "Progressive disclosure" below). All three are present on every card created through the API: `edit.create(title=..., summary=..., ...)` requires the two disclosure kwargs and inserts them into the YAML, plus a UUIDv4 `id` if the caller didn't supply one. `edit.update(card, summary=...)` also requires `summary` so the caller must make a deliberate decision about disclosure currency at every mutation (pass the existing value to acknowledge it's still accurate, or pass a new one to re-summarise). `Card.id`/`Card.title`/`Card.summary` use direct dict access and raise `KeyError` only if a card from a different source (manual file write, external import) lacks them — a missing disclosure key signals drift.
+`id`, `title`, and `summary` are the **disclosure trio** — the progressive-disclosure levels (see "Progressive disclosure" below). All three are present on every card created through the API: `editor.create(title=..., summary=..., ...)` requires the two disclosure kwargs and inserts them into the YAML, plus a UUIDv4 `id` if the caller didn't supply one. `editor.update(card, summary=...)` also requires `summary` so the caller must make a deliberate decision about disclosure currency at every structured mutation (pass the existing value to acknowledge it's still accurate, or pass a new one to re-summarise). For mechanical body-only edits (typo fixes, link updates), the substrate offers `editor.edit(card_id, old, new)` which does *not* force the disclosure check — see "Body edits" below for the duality. `Card.id`/`Card.title`/`Card.summary` use direct dict access and raise `KeyError` only if a card from a different source (manual file write, external import) lacks them — a missing disclosure key signals drift.
 
 `tags` is also a substrate filing key but with **different absence semantics**: untagged cards routinely omit the `tags` key, so `Card.tags` raising `KeyError` is *normal* for untagged cards, not drift. Callers who treat tags as optional use `card.yaml.get("tags", [])`.
 
-`MDDB.list()` returns `None` for missing title/summary values via `LEFT JOIN` to keep incomplete cards visible during overviews. YAML is loaded via `yaml.safe_load` (PyYAML defaults). Bare ISO dates parse as `datetime.date`; if you want date strings for lexicographic comparison, quote them in the source YAML.
+`MDDB.list()` returns `None` for missing title/summary values via nullable `entries.title` / `entries.summary` columns (populated from `card.yaml.get("title")` / `.get("summary")` at insert time) to keep incomplete cards visible during overviews. YAML is loaded via `yaml.safe_load` (PyYAML defaults). Bare ISO dates parse as `datetime.date`; if you want date strings for lexicographic comparison, quote them in the source YAML.
 
-On the write path, `_Edit.create` constructs YAML in **canonical key order**: `id`, `title`, `summary`, `tags` (when present), then the caller's remaining `yaml=` keys in their original relative order. The on-disk frontmatter is scannable: the first lines tell you what the card is. `_Edit.update` does NOT re-canonicalise existing YAML order (it preserves what's already on disk).
+On the write path, `_Editor.create` constructs YAML in **canonical key order**: `id`, `title`, `summary`, `tags` (when present), then the caller's remaining `yaml=` keys in their original relative order. The on-disk frontmatter is scannable: the first lines tell you what the card is. `_Editor.update` does NOT re-canonicalise existing YAML order (it preserves what's already on disk).
 
 Two PyYAML default overrides on the write path (`yaml.safe_dump(data, sort_keys=False, allow_unicode=True)`): `sort_keys=False` so cards retain the field order the caller wrote (alphabetised output reorders frontmatter on every update, which is jarring in git diffs); `allow_unicode=True` so international characters aren't escaped into `\\uXXXX` sequences in the on-disk YAML.
 
@@ -129,7 +131,7 @@ Title drives the default file slug; directory is the caller's choice via `relpat
 
 So `relpath="inventory"` and `relpath="inventory/"` both produce `inventory/<slug>.md`. A caller who wants a custom filename types the `.md` explicitly. Slug generation uses `python-slugify`'s defaults.
 
-Title and directory are **orthogonal**: title is *what the card is*; directory is *where the caller chose to put it*. Title changes do not move the file — `edit.update()` rewrites in place. To rename the file, call `edit.move(card_id, new_relpath)` explicitly (`git mv` + index update; id stays the same so history follows). Collisions on the resolved relpath raise `FileExistsError`; the caller resolves by changing the title or passing an explicit `relpath`.
+Title and directory are **orthogonal**: title is *what the card is*; directory is *where the caller chose to put it*. Title changes do not move the file — `editor.update()` rewrites in place. To rename the file, call `editor.move(card_id, new_relpath)` explicitly (`git mv` + index update; id stays the same so history follows). `move` takes an exact `.md` filename — it does *not* apply suffix-decides (unlike `relpath=` on `create`); a non-`.md` target raises `ValueError` because the cache rebuild only indexes `*.md` files and would lose the card. Collisions on the resolved relpath raise `FileExistsError`; the caller resolves by changing the title or passing an explicit `relpath`.
 
 ### Tags
 
@@ -139,7 +141,7 @@ The library-and-card-catalogue analogy: `relpath` is the shelves (one location p
 
 `Card.tags` is direct access (`self.yaml["tags"]`) — raises `KeyError` for untagged cards. Use `card.yaml.get("tags", [])` if absence should be treated as the empty list at the call site.
 
-`_Edit.create` and `_Edit.update` accept a three-state `tags: Sequence[str] | None = None` kwarg:
+`_Editor.create` and `_Editor.update` accept a three-state `tags: Sequence[str] | None = None` kwarg:
 
 - `tags=None` (default): no override. On `create`, the caller's `yaml["tags"]` is preserved if present. On `update`, `card.yaml["tags"]` is left as-is (in-place mutations the caller made before calling `update` persist).
 - `tags=()` / `tags=[]` (empty sequence): explicit clear. On `create`, no `tags` key on disk even if `yaml={"tags": [...]}` was passed. On `update`, the `tags` key is removed from `card.yaml`.
@@ -161,12 +163,12 @@ Self plus descendants: `f.value_str = 'area' OR f.value_str LIKE 'area/%'`. Subs
 
 ### Mutation flow
 
-All mutation flows through `db.edit()`. The commit phase, on clean `__exit__`:
+All mutation flows through `db.editor()`. The commit phase, on clean `__exit__`:
 
 1. `git rm` staged deletes.
 2. `git mv` staged moves (parent dirs created as needed).
 3. Write staged creates/updates via temp file + `os.replace`, then `git add`.
-4. One `git commit -m <rationale>`.
+4. One `git commit -m <rationale> -- <touched paths>` (path-restricted so unrelated pre-staged changes in the caller's working tree stay staged).
 5. SQLite insert/update/delete inside `with self.conn:`. If this raises, `sqlite3.Error` propagates and the cache may be left stale.
 
 The next `MDDB(path)` opens the cache if `meta.schema_version` matches; if missing or different version, it rebuilds from `.md` files on disk. There is no automatic stale-cache detection. If a SQLite mutation fails and you want a fresh index, `rm ~/.cache/mddb/<sha1(abs-path)>/index.sqlite` and reopen.
@@ -175,10 +177,12 @@ The next `MDDB(path)` opens the cache if `meta.schema_version` matches; if missi
 
 ```sql
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
-CREATE TABLE entries(rowid INTEGER PRIMARY KEY, id TEXT UNIQUE, relpath TEXT UNIQUE, yaml_text TEXT, body TEXT);
+CREATE TABLE entries(rowid INTEGER PRIMARY KEY, id TEXT UNIQUE, relpath TEXT UNIQUE, title TEXT, summary TEXT, yaml_text TEXT, body TEXT);
 CREATE TABLE entry_fields(entry_rowid INTEGER, key TEXT, value_str TEXT, value_num REAL);
 CREATE VIRTUAL TABLE entries_fts USING fts5(yaml_text, body, content='entries', content_rowid='rowid');
 ```
+
+`title` and `summary` are promoted to dedicated nullable columns on `entries` because they are part of the substrate filing/disclosure vocabulary; `db.list()` reads them directly. `entry_fields` indexes every *other* top-level scalar and list-of-scalars from `card.yaml` (notably `tags`) but skips `title` and `summary` (they have their own columns).
 
 SQLite default journal mode (single-writer). FTS sync via the standard external-content triggers (AI / AD / AU with the `'delete'` row idiom). `entries.body` and `entries.yaml_text` duplicate disk content for FTS; reads always go to disk.
 
@@ -207,27 +211,57 @@ If a particular query pattern shows up repeatedly in caller code, abstract it *i
 
 ### Edits
 
-`db.edit(rationale=...)` is the only mutation primitive. It returns a context manager that buffers `create`/`update`/`delete`/`move` and materialises them as one git commit + one SQLite transaction on clean `__exit__`. `edit.read()` sees the staged buffer; it is not itself buffered. On body exception, the buffer is dropped and the mddb root is untouched.
+`db.editor(rationale=...)` is the only mutation primitive. It returns a context manager that buffers `create`/`update`/`delete`/`move`/`edit` and materialises them as one git commit + one SQLite transaction on clean `__exit__`. `editor.read()` sees the staged buffer; it is not itself buffered. On body exception, the buffer is dropped and the mddb root is untouched.
 
 ```python
-with db.edit(rationale="bulk import of inventory cards") as edit:
-    a = edit.create(title="Fridge", summary="...", body="...")
-    b = edit.create(title="Shed",   summary="...", body="...")
-    edit.update(a, summary="...")
-    edit.move(b.id, "inventory/shed.md")
+with db.editor(rationale="bulk import of inventory cards") as editor:
+    a = editor.create(title="Fridge", summary="...", body="...")
+    b = editor.create(title="Shed",   summary="...", body="...")
+    editor.update(a, summary="...")
+    editor.move(b.id, "inventory/shed.md")
 ```
 
 Clean exit produces one commit covering all four operations. A body exception inside the `with` block produces no commit and no on-disk change.
 
-The edit rationale is the single commit message for the whole batch; there is no per-operation rationale. `edit.update(card, summary=...)` requires `summary` so the caller acknowledges the disclosure decision at every mutation.
+The editor rationale is the single commit message for the whole batch; there is no per-operation rationale. `editor.update(card, summary=...)` requires `summary` so the caller acknowledges the disclosure decision at every structured mutation.
 
-Returned `Card` objects are deep copies; mutate them freely without affecting the staged buffer. Mutation must go through `edit.update()` to persist.
+Returned `Card` objects are deep copies; mutate them freely without affecting the staged buffer. Mutation must go through `editor.update()` to persist.
 
-Operation collapse in a single edit: create + update → one create with mutated card; create + delete → no-op; update + delete → one delete; move + update → staged update at the new relpath; move-away-then-back → no-op; double-create at the same id → `RuntimeError`. Modify-after-delete raises `KeyError`.
+Operation collapse in a single editor: create + update → one create with mutated card; create + delete → no-op; update + delete → one delete; move + update → staged update at the new relpath; move-away-then-back → no-op; double-create at the same id → `RuntimeError`. Modify-after-delete raises `KeyError`.
 
-Reads (`db.read`, `db.list`, `db.history`, raw `db.conn` SELECTs) remain available during an active edit and see committed state, not the staged buffer. Once the commit phase begins, git/SQLite failures propagate native exceptions; the working tree or cache may be left dirty, matching the policy in "Mutation flow" above.
+Reads (`db.read`, `db.list`, `db.history`, raw `db.conn` SELECTs) remain available during an active editor and see committed state, not the staged buffer. Once the commit phase begins, git/SQLite failures propagate native exceptions; the working tree or cache may be left dirty, matching the policy in "Mutation flow" above.
 
-Nested edits raise `RuntimeError`. An edit is single-shot: after exit (clean, body exception, or commit-phase failure) it cannot be reused.
+Nested editors raise `RuntimeError`. An editor is single-shot: after exit (clean, body exception, or commit-phase failure) it cannot be reused.
+
+### Body edits
+
+Two paths for mutating a card's body, with different disclosure semantics:
+
+- **Disciplined path — `editor.update(card, summary=...)`.** Requires the caller to pass `summary` on every call. This is the *disclosure-currency check*: the caller has to make a deliberate decision about whether the existing summary still reflects what the card is about (pass it through unchanged) or whether the change warrants a new summary. Use this for structured changes that might alter the card's gist.
+
+- **Mechanical path — `editor.edit(card_id, old, new, *, replace_all=False) -> int`.** Body-only find/replace. Preserves title, summary, tags, relpath, and body content outside the match region. Mirrors `loop.edit(path, old, new)` semantics. Raises `ValueError` on empty `old`, `old` not found, or `old` found multiple times without `replace_all=True` (unless `old == new`, which short-circuits as a no-op returning the match count without staging or raising). Returns the replacement count. Does *not* force a disclosure check — the targeted use case is mechanical edits (typo fixes, variable renames, link updates) where re-summarising is overkill.
+
+The substrate enforces neither — both paths are available; the caller picks. This is a deliberate policy retreat from the previous rule's universality. `editor.edit` could in principle be used to replace a substantive claim and leave a stale summary; the substrate cannot tell trivial from semantic body changes. Use `update` when the change might affect what the card *is about*; use `edit` for typo fixes and mechanical renames.
+
+**Footgun — `edit` then `update` with a stale snapshot.** `editor.update` replaces the staged card *wholesale* with the caller-supplied `Card`. So if a caller mixes `editor.edit` and `editor.update` on the same card within one editor session and reuses a stale snapshot, the `update` silently overwrites the `edit`-staged body:
+
+```python
+card = db.read(card_id)  # snapshot, body="foo"
+with db.editor(rationale="...") as editor:
+    editor.edit(card.id, "foo", "bar")           # stages body="bar"
+    editor.update(card, summary=card.summary)    # overwrites with stale body="foo"
+```
+
+To compose them safely, re-read the card via `editor.read(card_id)` after any body-staging operation before passing it to `editor.update`:
+
+```python
+with db.editor(rationale="...") as editor:
+    editor.edit(card.id, "foo", "bar")
+    fresh = editor.read(card.id)
+    editor.update(fresh, summary=fresh.summary)
+```
+
+The substrate does not auto-detect this — distinguishing an `edit`-staged overwrite from a legitimate update-after-update would require per-staged-record provenance, out of scope for the primitive itself.
 
 ### Progressive disclosure
 
@@ -235,11 +269,7 @@ Three disclosure levels — `id` → `title` → `summary` → full card. This i
 
 ```python
 # Level 1: headlines — just id and title
-for cid, title in db.conn.execute(
-    "SELECT entries.id, f.value_str FROM entries "
-    "LEFT JOIN entry_fields f "
-    "  ON f.entry_rowid = entries.rowid AND f.key = 'title'"
-):
+for cid, title in db.conn.execute("SELECT id, title FROM entries"):
     ...
 
 # Level 2: summary view — id, title, summary (this is what db.list() returns)
@@ -306,5 +336,7 @@ Other ruff defaults are left alone.
 
 - `id` is immutable.
 - `relpath` must not collide.
+- `relpath` must be relative, canonical (no `.` or `..` path parts), inside the mddb root after symlink resolution, AND textually equal to its resolved relative path (no symlink aliases). Validated at `create` and `move`; other operations preserve the existing relpath. Violations raise `ValueError` — the substrate refuses to store a relpath the cache rebuild can't reproduce.
+- `editor` commits only the paths it touched (via `git commit -- <paths>`); pre-staged unrelated changes in the caller's working tree are left staged, not swept into the editor's commit.
 - SQLite is disposable; `.md` files and git are truth.
 - Concurrent writers from another process are outside the prototype contract.

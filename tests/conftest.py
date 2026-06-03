@@ -35,8 +35,8 @@ def db(tmp_path):
 @pytest.fixture
 def seed(db):
     def _seed(**kwargs):
-        rationale = kwargs.pop("rationale", "seed")
-        with db.edit(rationale=rationale) as edit:
-            return edit.create(**kwargs)
+        rationale = kwargs.pop("rationale", "seeding fixture card for test")
+        with db.editor(rationale=rationale) as editor:
+            return editor.create(**kwargs)
 
     return _seed

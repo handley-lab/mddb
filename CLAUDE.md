@@ -60,10 +60,10 @@ class MDDB:
     def read(self, card_id: str) -> Card: ...
     def list(self) -> list[dict]: ...  # [{id, title, summary}, ...] — progressive disclosure
     def history(self, card_id: str) -> list[dict]: ...
-    def transaction(self, *, rationale: str) -> Transaction: ...
+    def edit(self, *, rationale: str) -> _Edit: ...
     conn: sqlite3.Connection  # exposed; write SQL against the schema below
 
-class Transaction:
+class _Edit:  # private; only reachable via the with-block from MDDB.edit
     def create(self, *, title: str, summary: str, yaml: dict | None = None,
                body: str = "", relpath: str = "") -> Card: ...
     def read(self, card_id: str) -> Card: ...
@@ -113,7 +113,7 @@ Title and directory are **orthogonal**: title is *what the card is*; directory i
 
 ### Mutation flow
 
-All mutation flows through `db.transaction()`. The commit phase, on clean `__exit__`:
+All mutation flows through `db.edit()`. The commit phase, on clean `__exit__`:
 
 1. `git rm` staged deletes.
 2. `git mv` staged moves (parent dirs created as needed).
@@ -157,29 +157,29 @@ cards = [db.read(i) for i in ids]
 
 If a particular query pattern shows up repeatedly in caller code, abstract it *in the caller*, not in the substrate.
 
-### Transactions
+### Edits
 
-`db.transaction(rationale=...)` is the only mutation primitive. It returns a context manager that buffers `create`/`update`/`delete`/`move` and materialises them as one git commit + one SQLite transaction on clean `__exit__`. `tx.read()` sees the staged buffer; it is not itself buffered. On body exception, the buffer is dropped and the mddb root is untouched.
+`db.edit(rationale=...)` is the only mutation primitive. It returns a context manager that buffers `create`/`update`/`delete`/`move` and materialises them as one git commit + one SQLite transaction on clean `__exit__`. `edit.read()` sees the staged buffer; it is not itself buffered. On body exception, the buffer is dropped and the mddb root is untouched.
 
 ```python
-with db.transaction(rationale="bulk import of inventory cards") as tx:
-    a = tx.create(title="Fridge", summary="...", body="...")
-    b = tx.create(title="Shed",   summary="...", body="...")
-    tx.update(a, summary="...")
-    tx.move(b.id, "inventory/shed.md")
+with db.edit(rationale="bulk import of inventory cards") as edit:
+    a = edit.create(title="Fridge", summary="...", body="...")
+    b = edit.create(title="Shed",   summary="...", body="...")
+    edit.update(a, summary="...")
+    edit.move(b.id, "inventory/shed.md")
 ```
 
 Clean exit produces one commit covering all four operations. A body exception inside the `with` block produces no commit and no on-disk change.
 
-The transaction rationale is the single commit message for the whole batch; there is no per-operation rationale. `tx.update(card, summary=...)` requires `summary` so the caller acknowledges the disclosure decision at every mutation.
+The edit rationale is the single commit message for the whole batch; there is no per-operation rationale. `edit.update(card, summary=...)` requires `summary` so the caller acknowledges the disclosure decision at every mutation.
 
-Returned `Card` objects are deep copies; mutate them freely without affecting the staged buffer. Mutation must go through `tx.update()` to persist.
+Returned `Card` objects are deep copies; mutate them freely without affecting the staged buffer. Mutation must go through `edit.update()` to persist.
 
-Operation collapse in a single transaction: create + update → one create with mutated card; create + delete → no-op; update + delete → one delete; move + update → staged update at the new relpath; move-away-then-back → no-op; double-create at the same id → `RuntimeError`. Modify-after-delete raises `KeyError`.
+Operation collapse in a single edit: create + update → one create with mutated card; create + delete → no-op; update + delete → one delete; move + update → staged update at the new relpath; move-away-then-back → no-op; double-create at the same id → `RuntimeError`. Modify-after-delete raises `KeyError`.
 
-Reads (`db.read`, `db.list`, `db.history`, raw `db.conn` SELECTs) remain available during an active transaction and see committed state, not the staged buffer. Once the commit phase begins, git/SQLite failures propagate native exceptions; the working tree or cache may be left dirty, matching the policy in "Mutation flow" above.
+Reads (`db.read`, `db.list`, `db.history`, raw `db.conn` SELECTs) remain available during an active edit and see committed state, not the staged buffer. Once the commit phase begins, git/SQLite failures propagate native exceptions; the working tree or cache may be left dirty, matching the policy in "Mutation flow" above.
 
-Nested transactions raise `RuntimeError`. A `Transaction` object is single-shot: after exit (clean, body exception, or commit-phase failure) it cannot be reused.
+Nested edits raise `RuntimeError`. An edit is single-shot: after exit (clean, body exception, or commit-phase failure) it cannot be reused.
 
 ### Progressive disclosure
 

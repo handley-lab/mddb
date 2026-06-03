@@ -61,10 +61,15 @@ class MDDB:
         self.root = Path(path).expanduser().resolve()
         if not (self.root / ".git").exists():
             self.root.mkdir(parents=True, exist_ok=True)
-            self._init_git()
+            subprocess.run(
+                ["git", "init", "-q", "-b", "master"], cwd=self.root, check=True
+            )
+            (self.root / ".gitignore").write_text("*.tmp\n")
+            self._git("add", "--", ".gitignore")
+            self._git("commit", "-m", "initial commit")
             print(f"mddb: initialised new mddb at {self.root}", file=sys.stderr)
         self.conn = index.open_index(self.root)
-        self._active_tx: Transaction | None = None
+        self._active_edit: _Edit | None = None
 
     def read(self, card_id: str) -> Card:
         """Read a card by id, returning a fresh :class:`Card` from disk.
@@ -149,9 +154,14 @@ class MDDB:
             )
         return commits
 
-    def transaction(self, *, rationale: str) -> Transaction:
-        """Open a batching context manager. See :class:`Transaction`."""
-        return Transaction(self, rationale)
+    def edit(self, *, rationale: str) -> _Edit:
+        """Open a context manager for a batch of mutations.
+
+        The returned object's `create`/`read`/`update`/`delete`/`move`
+        methods are buffered until the ``with`` block exits cleanly, then
+        materialised as one git commit + one SQLite transaction.
+        """
+        return _Edit(self, rationale)
 
     def _relpath(self, card_id: str) -> str:
         row = self.conn.execute(
@@ -160,17 +170,6 @@ class MDDB:
         if row is None:
             raise KeyError(card_id)
         return row[0]
-
-    def _write_atomic(self, target: Path, text: str) -> None:
-        tmp = target.with_suffix(target.suffix + f".{uuid.uuid4().hex}.tmp")
-        tmp.write_text(text)
-        os.replace(tmp, target)
-
-    def _init_git(self) -> None:
-        subprocess.run(["git", "init", "-q", "-b", "master"], cwd=self.root, check=True)
-        (self.root / ".gitignore").write_text("*.tmp\n")
-        self._git("add", "--", ".gitignore")
-        self._git("commit", "-m", "initial commit")
 
     def _git(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -185,16 +184,16 @@ class MDDB:
             raise ValueError(f"invalid relpath: {relpath}")
 
 
-class Transaction:
-    """Buffer create/read/update/delete/move operations and materialise them as one commit on clean exit.
+class _Edit:
+    """Buffer create/read/update/delete/move and materialise them as one commit on clean exit.
 
-    Construct via :meth:`MDDB.transaction`. Operations are staged in memory
-    until the ``with`` block exits cleanly; on body exception, nothing is
-    written. On clean exit with a non-empty buffer, the entire batch is
-    materialised as a single git commit and a single SQLite transaction.
+    Construct via :meth:`MDDB.edit`. Operations are staged in memory until
+    the ``with`` block exits cleanly; on body exception, nothing is written.
+    On clean exit with a non-empty buffer, the entire batch is materialised
+    as a single git commit and a single SQLite transaction.
 
-    A ``Transaction`` is single-shot — after ``__exit__`` (clean or not),
-    further verb calls and re-entry both raise ``RuntimeError``.
+    Single-shot — after ``__exit__`` (clean or not), further verb calls
+    and re-entry both raise ``RuntimeError``.
     """
 
     def __init__(self, db: MDDB, rationale: str):
@@ -204,12 +203,12 @@ class Transaction:
         self._relpaths: dict[str, str] = {}
         self._closed = False
 
-    def __enter__(self) -> Transaction:
+    def __enter__(self) -> _Edit:
         if self._closed:
-            raise RuntimeError("transaction already closed")
-        if self._db._active_tx is not None:
-            raise RuntimeError("nested transactions are not supported")
-        self._db._active_tx = self
+            raise RuntimeError("edit already closed")
+        if self._db._active_edit is not None:
+            raise RuntimeError("nested edits are not supported")
+        self._db._active_edit = self
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -217,7 +216,7 @@ class Transaction:
             if exc_type is None and self._staged:
                 self._commit()
         finally:
-            self._db._active_tx = None
+            self._db._active_edit = None
             self._closed = True
 
     def create(
@@ -231,7 +230,7 @@ class Transaction:
     ) -> Card:
         """Stage a new card for creation. Materialises on clean ``__exit__``."""
         if self._closed:
-            raise RuntimeError("transaction already closed")
+            raise RuntimeError("edit already closed")
         yaml_d = dict(yaml or {})
         yaml_d["title"] = title
         yaml_d["summary"] = summary
@@ -242,7 +241,7 @@ class Transaction:
         self._db._validate_relpath(resolved)
         new_id = new_card.id
         if new_id in self._staged:
-            raise RuntimeError(f"duplicate id in transaction: {new_id}")
+            raise RuntimeError(f"duplicate id in edit: {new_id}")
         row = self._db.conn.execute(
             "SELECT 1 FROM entries WHERE id = ?", (new_id,)
         ).fetchone()
@@ -261,7 +260,7 @@ class Transaction:
     def read(self, card_id: str) -> Card:
         """Read a card with staged-state visibility."""
         if self._closed:
-            raise RuntimeError("transaction already closed")
+            raise RuntimeError("edit already closed")
         staged = self._staged.get(card_id)
         if staged is not None:
             if staged.card is None and staged.relpath is None:
@@ -274,7 +273,7 @@ class Transaction:
     def update(self, card: Card, *, summary: str) -> Card:
         """Stage an update to ``card``. Caller's ``Card`` is deep-copied before staging."""
         if self._closed:
-            raise RuntimeError("transaction already closed")
+            raise RuntimeError("edit already closed")
         card.yaml["summary"] = summary
         card_id = card.id
         staged = self._staged.get(card_id)
@@ -298,7 +297,7 @@ class Transaction:
     def delete(self, card_id: str) -> None:
         """Stage a delete of ``card_id``."""
         if self._closed:
-            raise RuntimeError("transaction already closed")
+            raise RuntimeError("edit already closed")
         staged = self._staged.get(card_id)
         if staged is not None and staged.card is None and staged.relpath is None:
             raise KeyError(card_id)
@@ -328,7 +327,7 @@ class Transaction:
     def move(self, card_id: str, new_relpath: str) -> None:
         """Stage a relpath change for ``card_id``."""
         if self._closed:
-            raise RuntimeError("transaction already closed")
+            raise RuntimeError("edit already closed")
         self._db._validate_relpath(new_relpath)
         staged = self._staged.get(card_id)
         if staged is not None and staged.card is None and staged.relpath is None:
@@ -397,7 +396,9 @@ class Transaction:
             if staged.card is not None and staged.relpath is not None:
                 target = self._db.root / staged.relpath
                 target.parent.mkdir(parents=True, exist_ok=True)
-                self._db._write_atomic(target, str(staged.card))
+                tmp = target.with_suffix(target.suffix + f".{uuid.uuid4().hex}.tmp")
+                tmp.write_text(str(staged.card))
+                os.replace(tmp, target)
                 self._db._git("add", "--", staged.relpath)
         self._db._git("commit", "-m", self._rationale)
         with self._db.conn:

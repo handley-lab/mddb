@@ -11,8 +11,8 @@ import mddb
 
 db = mddb.MDDB("~/my-mddb")
 
-with db.transaction(rationale="bought today") as tx:
-    card = tx.create(
+with db.edit(rationale="bought today") as edit:
+    card = edit.create(
         title="Shed inventory",
         summary="Tools and equipment kept in the shed.",
         yaml={"tags": ["shed"], "location": "shed"},
@@ -24,16 +24,16 @@ card = db.read(card.id)
 
 # mutate and write back
 card.yaml["location"] = "barn"
-with db.transaction(rationale="moved to barn") as tx:
-    tx.update(card, summary="Tools and equipment, moved to the barn.")
+with db.edit(rationale="moved to barn") as edit:
+    edit.update(card, summary="Tools and equipment, moved to the barn.")
 ```
 
-`db.transaction()` is the only mutation primitive. Batch many mutations into one commit + one SQLite transaction. A body exception inside the `with` block discards the buffer; on-disk state is unchanged.
+`db.edit()` is the only mutation primitive. Batch many mutations into one commit + one SQLite transaction. A body exception inside the `with` block discards the buffer; on-disk state is unchanged.
 
 ```python
-with db.transaction(rationale="bulk import") as tx:
+with db.edit(rationale="bulk import") as edit:
     for item in ["fridge", "shed", "loft"]:
-        tx.create(title=item.title(), summary=f"contents of the {item}")
+        edit.create(title=item.title(), summary=f"contents of the {item}")
 
 # full-text via raw SQL — no DSL
 ids = [r[0] for r in db.conn.execute(

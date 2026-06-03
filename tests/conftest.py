@@ -36,7 +36,7 @@ def db(tmp_path):
 def seed(db):
     def _seed(**kwargs):
         rationale = kwargs.pop("rationale", "seed")
-        with db.transaction(rationale=rationale) as tx:
-            return tx.create(**kwargs)
+        with db.edit(rationale=rationale) as edit:
+            return edit.create(**kwargs)
 
     return _seed

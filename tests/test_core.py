@@ -25,15 +25,15 @@ def test_update(db, seed):
         body="a",
     )
     card.yaml["location"] = "barn"
-    with db.transaction(rationale="moved shed contents to barn") as tx:
-        tx.update(card, summary="Tools and equipment, moved to the barn.")
+    with db.edit(rationale="moved shed contents to barn") as edit:
+        edit.update(card, summary="Tools and equipment, moved to the barn.")
     assert db.read(card.id).yaml["location"] == "barn"
 
 
 def test_delete(db, seed):
     card = seed(title="Disposable", summary="A card created so we can verify delete.")
-    with db.transaction(rationale="verifying removal makes read raise") as tx:
-        tx.delete(card.id)
+    with db.edit(rationale="verifying removal makes read raise") as edit:
+        edit.delete(card.id)
     with pytest.raises(KeyError):
         db.read(card.id)
 
@@ -44,8 +44,8 @@ def test_move_keeps_id(db, seed):
         summary="A card initially at the root.",
         body="contents",
     )
-    with db.transaction(rationale="reorganised into subfolder") as tx:
-        tx.move(card.id, "moved/here.md")
+    with db.edit(rationale="reorganised into subfolder") as edit:
+        edit.move(card.id, "moved/here.md")
     again = db.read(card.id)
     assert again.id == card.id
     assert again.body == "contents"
@@ -85,8 +85,8 @@ def test_history(db, seed):
         rationale="initial commit message",
     )
     card.yaml["x"] = 2
-    with db.transaction(rationale="bumped x") as tx:
-        tx.update(card, summary=card.summary)
+    with db.edit(rationale="bumped x") as edit:
+        edit.update(card, summary=card.summary)
     commits = db.history(card.id)
     assert [c["message"].strip() for c in commits] == [
         "bumped x",
@@ -157,6 +157,6 @@ def test_card_properties_raise_on_missing_keys():
         _ = card.summary
 
 
-def test_mddb_init_sets_active_tx_none(tmp_path):
+def test_mddb_init_sets_active_edit_none(tmp_path):
     new_db = mddb.MDDB(tmp_path)
-    assert new_db._active_tx is None
+    assert new_db._active_edit is None

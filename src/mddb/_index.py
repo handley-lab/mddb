@@ -127,9 +127,7 @@ def update_content(conn: sqlite3.Connection, card: Card) -> None:
 
 def update_relpath(conn: sqlite3.Connection, card_id: str, relpath: str) -> None:
     """Point the cache at a new on-disk path for ``card_id``."""
-    conn.execute(
-        "UPDATE entries SET relpath = ? WHERE id = ?", (relpath, card_id)
-    )
+    conn.execute("UPDATE entries SET relpath = ? WHERE id = ?", (relpath, card_id))
 
 
 def delete(conn: sqlite3.Connection, card_id: str) -> None:
@@ -145,8 +143,7 @@ def list_progressive(conn: sqlite3.Connection) -> list[dict]:
         "LEFT JOIN entry_fields s ON s.entry_rowid = entries.rowid AND s.key = 'summary'"
     ).fetchall()
     return [
-        {"id": cid, "title": title, "summary": summary}
-        for cid, title, summary in rows
+        {"id": cid, "title": title, "summary": summary} for cid, title, summary in rows
     ]
 
 

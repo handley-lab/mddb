@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,6 +125,7 @@ class MDDB:
         return subprocess.run(
             ["git", *args], cwd=self.root, check=True, capture_output=True, text=True
         )
+
 
 @dataclass
 class _Staged:

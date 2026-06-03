@@ -198,7 +198,7 @@ def test_edit_move_existing(db, seed):
     assert _git_log_count(db) == before + 1
     assert not (db.root / "orig.md").exists()
     assert (db.root / "moved.md").exists()
-    assert _index.relpath_of(db.conn,card.id) == "moved.md"
+    assert _index.relpath_of(db.conn, card.id) == "moved.md"
 
 
 def test_edit_move_to_subdirectory(db, seed):
@@ -209,9 +209,7 @@ def test_edit_move_to_subdirectory(db, seed):
 
 
 def test_edit_move_only_does_not_rewrite_body(db, seed):
-    card = seed(
-        title="A", summary="A", body="byte-exact body\n", relpath="orig.md"
-    )
+    card = seed(title="A", summary="A", body="byte-exact body\n", relpath="orig.md")
     original_text = (db.root / "orig.md").read_text()
     with db.edit(rationale="move only") as edit:
         edit.move(card.id, "new.md")
@@ -257,7 +255,7 @@ def test_edit_move_staged_create(db):
 
 def test_edit_move_same_path_is_noop(db, seed):
     card = seed(title="A", summary="A")
-    current = _index.relpath_of(db.conn,card.id)
+    current = _index.relpath_of(db.conn, card.id)
     before = _git_log_count(db)
     with db.edit(rationale="self move") as edit:
         edit.move(card.id, current)
@@ -350,8 +348,8 @@ def test_edit_move_into_committed_unstaged_card_relpath_raises(db, seed):
     with db.edit(rationale="move into committed") as edit:
         with pytest.raises(FileExistsError):
             edit.move(a.id, "beta.md")
-    assert _index.relpath_of(db.conn,a.id) == "alpha.md"
-    assert _index.relpath_of(db.conn,b.id) == "beta.md"
+    assert _index.relpath_of(db.conn, a.id) == "alpha.md"
+    assert _index.relpath_of(db.conn, b.id) == "beta.md"
 
 
 def test_edit_move_away_and_back_collapses(db, seed):

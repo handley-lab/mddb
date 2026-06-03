@@ -57,12 +57,7 @@ The mddb directory stays clean of mddb-specific cruft. The cache is fully derive
 ```python
 class MDDB:
     def __init__(self, path: Path | str): ...
-    def create(self, *, title: str, summary: str, yaml: dict | None = None,
-               body: str = "", rationale: str, relpath: str | None = None) -> Card: ...
     def read(self, card_id: str) -> Card: ...
-    def update(self, card: Card, *, summary: str, rationale: str) -> Card: ...
-    def delete(self, card_id: str, *, rationale: str) -> None: ...
-    def move(self, card_id: str, new_relpath: str, *, rationale: str) -> None: ...
     def list(self) -> list[dict]: ...  # [{id, title, summary}, ...] — progressive disclosure
     def history(self, card_id: str) -> list[dict]: ...
     def transaction(self, *, rationale: str) -> Transaction: ...
@@ -70,7 +65,7 @@ class MDDB:
 
 class Transaction:
     def create(self, *, title: str, summary: str, yaml: dict | None = None,
-               body: str = "", relpath: str | None = None) -> Card: ...
+               body: str = "", relpath: str = "") -> Card: ...
     def read(self, card_id: str) -> Card: ...
     def update(self, card: Card, *, summary: str) -> Card: ...
     def delete(self, card_id: str) -> None: ...
@@ -100,31 +95,33 @@ id: <uuid-v4>
 <markdown body>
 ```
 
-`id`, `title`, and `summary` are the three substrate-privileged keys (see "Progressive disclosure" below). All three are present on every card created through the API: `MDDB.create(title=..., summary=..., ...)` requires the two disclosure kwargs and inserts them into the YAML, plus a UUIDv4 `id` if the caller didn't supply one. `MDDB.update(card, summary=..., ...)` also requires `summary` so the caller must make a deliberate decision about disclosure currency at every mutation (pass the existing value to acknowledge it's still accurate, or pass a new one to re-summarise). `Card.id`/`Card.title`/`Card.summary` use direct dict access and raise `KeyError` only if a card from a different source (manual file write, gtd import) lacks them. `MDDB.list()` returns `None` for missing values via `LEFT JOIN` to keep incomplete cards visible during overviews. YAML is loaded via `yaml.safe_load` (PyYAML defaults). Bare ISO dates parse as `datetime.date`; if you want date strings for lexicographic comparison, quote them in the source YAML.
+`id`, `title`, and `summary` are the three substrate-privileged keys (see "Progressive disclosure" below). All three are present on every card created through the API: `tx.create(title=..., summary=..., ...)` requires the two disclosure kwargs and inserts them into the YAML, plus a UUIDv4 `id` if the caller didn't supply one. `tx.update(card, summary=...)` also requires `summary` so the caller must make a deliberate decision about disclosure currency at every mutation (pass the existing value to acknowledge it's still accurate, or pass a new one to re-summarise). `Card.id`/`Card.title`/`Card.summary` use direct dict access and raise `KeyError` only if a card from a different source (manual file write, gtd import) lacks them. `MDDB.list()` returns `None` for missing values via `LEFT JOIN` to keep incomplete cards visible during overviews. YAML is loaded via `yaml.safe_load` (PyYAML defaults). Bare ISO dates parse as `datetime.date`; if you want date strings for lexicographic comparison, quote them in the source YAML.
 
 Two PyYAML default overrides on the write path (`yaml.safe_dump(data, sort_keys=False, allow_unicode=True)`): `sort_keys=False` so cards retain the field order the caller wrote (alphabetised output reorders frontmatter on every update, which is jarring in git diffs); `allow_unicode=True` so international characters aren't escaped into `\\uXXXX` sequences in the on-disk YAML.
 
 ### Directories and slugs
 
-Title drives the default file slug; directory is the caller's choice via `relpath`. Resolution rules:
+Title drives the default file slug; directory is the caller's choice via `relpath`. Resolution rules (suffix-decides):
 
-- `relpath=None` → `<slugify(title)>.md` (flat at root).
-- `relpath="inventory/"` (trailing slash) → directory; substrate appends `<slugify(title)>.md`.
-- `relpath="inventory/fridge"` → substrate appends `.md`.
-- `relpath="inventory/fridge.md"` → used verbatim.
+- `relpath=""` (default) → `<slugify(title)>.md` (flat at root).
+- `relpath` ends in `.md` → used verbatim as the filename.
+- otherwise → treated as a directory; substrate appends `<slugify(title)>.md` inside it.
 
-`slugify()` is in `mddb.card`: lowercases, replaces runs of non-word characters with hyphens, returns `"untitled"` for empty input.
+So `relpath="inventory"` and `relpath="inventory/"` both produce `inventory/<slug>.md`. A caller who wants a custom filename types the `.md` explicitly. Slug generation uses `python-slugify`'s defaults.
 
-Title and directory are **orthogonal**: title is *what the card is*; directory is *where the caller chose to put it*. Title changes do not move the file — `db.update()` rewrites in place. To rename the file, call `db.move(card_id, new_relpath, rationale=...)` explicitly (`git mv` + index update; id stays the same so history follows). Collisions on the resolved relpath raise `FileExistsError`; the caller resolves by changing the title or passing an explicit `relpath`.
+Title and directory are **orthogonal**: title is *what the card is*; directory is *where the caller chose to put it*. Title changes do not move the file — `tx.update()` rewrites in place. To rename the file, call `tx.move(card_id, new_relpath)` explicitly (`git mv` + index update; id stays the same so history follows). Collisions on the resolved relpath raise `FileExistsError`; the caller resolves by changing the title or passing an explicit `relpath`.
 
 ### Mutation flow
 
-1. Build new card bytes + commit message in memory.
-2. Create / update: write to a sibling temp file, `os.replace` to relpath. Delete: skip.
-3. Create / update: `git add -- <relpath>`. Delete: `git rm -- <relpath>`. Then `git commit -m <rationale>`.
-4. Insert / update / delete the matching row in SQLite inside `with self.conn:`. If this raises, the `sqlite3.Error` propagates; the cache may be left in a stale state.
+All mutation flows through `db.transaction()`. The commit phase, on clean `__exit__`:
 
-The next `MDDB(path)` opens the cache if `meta.schema_version` matches; if the cache file is missing or carries a different version, it rebuilds from `.md` files on disk. Other SQLite failures (corruption, missing tables) propagate as `sqlite3.Error`. There is no automatic stale-cache detection. If a SQLite mutation fails and you want a fresh index, `rm ~/.cache/mddb/<sha1(abs-path)>/index.sqlite` and reopen. Git and SQLite failures propagate; if `git commit` fails after `os.replace`, the working tree is dirty and the caller resolves with the native exception.
+1. `git rm` staged deletes.
+2. `git mv` staged moves (parent dirs created as needed).
+3. Write staged creates/updates via temp file + `os.replace`, then `git add`.
+4. One `git commit -m <rationale>`.
+5. SQLite insert/update/delete inside `with self.conn:`. If this raises, `sqlite3.Error` propagates and the cache may be left stale.
+
+The next `MDDB(path)` opens the cache if `meta.schema_version` matches; if missing or different version, it rebuilds from `.md` files on disk. There is no automatic stale-cache detection. If a SQLite mutation fails and you want a fresh index, `rm ~/.cache/mddb/<sha1(abs-path)>/index.sqlite` and reopen.
 
 ### SQLite
 
@@ -162,7 +159,7 @@ If a particular query pattern shows up repeatedly in caller code, abstract it *i
 
 ### Transactions
 
-`db.transaction(rationale=...)` returns a context manager that buffers mutations (`create`/`update`/`delete`/`move`) and materialises them as one git commit + one SQLite transaction on clean `__exit__`. `tx.read()` sees the staged buffer; it is not itself buffered. On body exception, the buffer is dropped and the mddb root is untouched.
+`db.transaction(rationale=...)` is the only mutation primitive. It returns a context manager that buffers `create`/`update`/`delete`/`move` and materialises them as one git commit + one SQLite transaction on clean `__exit__`. `tx.read()` sees the staged buffer; it is not itself buffered. On body exception, the buffer is dropped and the mddb root is untouched.
 
 ```python
 with db.transaction(rationale="bulk import of inventory cards") as tx:
@@ -174,13 +171,13 @@ with db.transaction(rationale="bulk import of inventory cards") as tx:
 
 Clean exit produces one commit covering all four operations. A body exception inside the `with` block produces no commit and no on-disk change.
 
-The transaction rationale is the single commit message for the whole batch; there is no per-operation rationale. `tx.update(card, summary=...)` still requires `summary` for the same reason `db.update` does — the caller acknowledges the disclosure decision at every mutation.
+The transaction rationale is the single commit message for the whole batch; there is no per-operation rationale. `tx.update(card, summary=...)` requires `summary` so the caller acknowledges the disclosure decision at every mutation.
 
 Returned `Card` objects are deep copies; mutate them freely without affecting the staged buffer. Mutation must go through `tx.update()` to persist.
 
-Operation collapse in a single transaction: create + update → one create with mutated card; create + delete → no-op; update + delete → one delete; move + update → staged update at the new relpath; double-create at the same id → `RuntimeError`. Modify-after-delete raises `KeyError`.
+Operation collapse in a single transaction: create + update → one create with mutated card; create + delete → no-op; update + delete → one delete; move + update → staged update at the new relpath; move-away-then-back → no-op; double-create at the same id → `RuntimeError`. Modify-after-delete raises `KeyError`.
 
-Atomicity scope. The "body exception → no on-disk change" guarantee covers calls through the public `MDDB` and `Transaction` mutator API only. Direct calls to `db.create/update/delete/move` during an active transaction raise `RuntimeError`; reads (`db.read`, `db.list`, `db.history`, raw `db.conn` SELECTs) remain available and see committed state, not the staged buffer. Once the commit phase begins, git/SQLite failures propagate native exceptions; the working tree or cache may be left dirty, matching the single-op mutation policy in "Mutation flow" above.
+Reads (`db.read`, `db.list`, `db.history`, raw `db.conn` SELECTs) remain available during an active transaction and see committed state, not the staged buffer. Once the commit phase begins, git/SQLite failures propagate native exceptions; the working tree or cache may be left dirty, matching the policy in "Mutation flow" above.
 
 Nested transactions raise `RuntimeError`. A `Transaction` object is single-shot: after exit (clean, body exception, or commit-phase failure) it cannot be reused.
 

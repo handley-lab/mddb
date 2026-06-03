@@ -52,8 +52,8 @@ def test_transaction_collision_in_buffer(db):
             tx.create(title="B", summary="x", relpath="dup.md")
 
 
-def test_transaction_collision_against_disk(db):
-    db.create(title="Existing", summary="x", rationale="seed", relpath="seed.md")
+def test_transaction_collision_against_disk(db, seed):
+    seed(title="Existing", summary="x", relpath="seed.md")
     with db.transaction(rationale="collision against disk") as tx:
         with pytest.raises(FileExistsError):
             tx.create(title="Other", summary="x", relpath="seed.md")
@@ -108,13 +108,8 @@ def test_transaction_duplicate_id_in_buffer(db):
             tx.create(title="B", summary="B", yaml={"id": "fixed"})
 
 
-def test_transaction_id_collision_against_db(db):
-    db.create(
-        title="X",
-        summary="seed",
-        yaml={"id": "fixed-id"},
-        rationale="seed",
-    )
+def test_transaction_id_collision_against_db(db, seed):
+    seed(title="X", summary="seed", yaml={"id": "fixed-id"})
     with db.transaction(rationale="id collision db") as tx:
         with pytest.raises(RuntimeError, match="id already exists"):
             tx.create(title="Y", summary="y", yaml={"id": "fixed-id"})
@@ -142,34 +137,6 @@ def test_transaction_closed_after_successful_commit(db):
         tx.create(title="B", summary="B")
 
 
-def test_base_mutators_blocked_during_active_transaction(db):
-    seed = db.create(title="Seed", summary="seed", rationale="seed")
-    with db.transaction(rationale="active") as _tx:
-        with pytest.raises(RuntimeError, match="while a transaction is active"):
-            db.create(title="X", summary="x", rationale="r")
-        with pytest.raises(RuntimeError, match="while a transaction is active"):
-            db.update(seed, summary="x", rationale="r")
-        with pytest.raises(RuntimeError, match="while a transaction is active"):
-            db.delete(seed.id, rationale="r")
-        with pytest.raises(RuntimeError, match="while a transaction is active"):
-            db.move(seed.id, "moved.md", rationale="r")
-
-
-def test_base_reads_allowed_during_active_transaction(db):
-    seed = db.create(title="Seed", summary="seed", rationale="seed")
-    with db.transaction(rationale="active") as _tx:
-        assert db.read(seed.id).id == seed.id
-        listed = db.list()
-        assert any(e["id"] == seed.id for e in listed)
-        assert db.history(seed.id)
-        db.conn.execute("SELECT 1").fetchone()
-
-
-def test_mddb_init_sets_active_tx_none(tmp_path):
-    new_db = mddb.MDDB(tmp_path)
-    assert new_db._active_tx is None
-
-
 def test_transaction_read_sees_staged(db):
     with db.transaction(rationale="read staged") as tx:
         card = tx.create(title="A", summary="A", body="body-a")
@@ -177,8 +144,8 @@ def test_transaction_read_sees_staged(db):
         assert again.body == "body-a"
 
 
-def test_transaction_read_existing_then_update(db):
-    card = db.create(title="A", summary="A", body="x", rationale="seed")
+def test_transaction_read_existing_then_update(db, seed):
+    card = seed(title="A", summary="A", body="x")
     with db.transaction(rationale="update existing") as tx:
         existing = tx.read(card.id)
         existing.body = "y"
@@ -207,76 +174,70 @@ def test_transaction_create_then_delete(db):
     assert db.conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0] == 0
 
 
-def test_transaction_delete_then_create_same_relpath(db):
-    seed = db.create(title="Old", summary="old", relpath="slot.md", rationale="seed")
+def test_transaction_delete_then_create_same_relpath(db, seed):
+    old = seed(title="Old", summary="old", relpath="slot.md")
     before = _git_log_count(db)
     with db.transaction(rationale="swap") as tx:
-        tx.delete(seed.id)
+        tx.delete(old.id)
         new = tx.create(title="New", summary="new", relpath="slot.md")
     assert _git_log_count(db) == before + 1
     again = db.read(new.id)
     assert again.title == "New"
     with pytest.raises(KeyError):
-        db.read(seed.id)
+        db.read(old.id)
 
 
-def test_transaction_move_existing(db):
-    seed = db.create(title="A", summary="A", relpath="orig.md", rationale="seed")
+def test_transaction_move_existing(db, seed):
+    card = seed(title="A", summary="A", relpath="orig.md")
     before = _git_log_count(db)
     with db.transaction(rationale="move") as tx:
-        tx.move(seed.id, "moved.md")
+        tx.move(card.id, "moved.md")
     assert _git_log_count(db) == before + 1
     assert not (db.root / "orig.md").exists()
     assert (db.root / "moved.md").exists()
-    assert db._relpath(seed.id) == "moved.md"
+    assert db._relpath(card.id) == "moved.md"
 
 
-def test_transaction_move_to_subdirectory(db):
-    seed = db.create(title="A", summary="A", relpath="flat.md", rationale="seed")
+def test_transaction_move_to_subdirectory(db, seed):
+    card = seed(title="A", summary="A", relpath="flat.md")
     with db.transaction(rationale="move to subdir") as tx:
-        tx.move(seed.id, "sub/dir/here.md")
+        tx.move(card.id, "sub/dir/here.md")
     assert (db.root / "sub" / "dir" / "here.md").exists()
 
 
-def test_transaction_move_only_does_not_rewrite_body(db):
-    seed = db.create(
-        title="A",
-        summary="A",
-        body="byte-exact body\n",
-        rationale="seed",
-        relpath="orig.md",
+def test_transaction_move_only_does_not_rewrite_body(db, seed):
+    card = seed(
+        title="A", summary="A", body="byte-exact body\n", relpath="orig.md"
     )
     original_text = (db.root / "orig.md").read_text()
     with db.transaction(rationale="move only") as tx:
-        tx.move(seed.id, "new.md")
+        tx.move(card.id, "new.md")
     assert (db.root / "new.md").read_text() == original_text
 
 
-def test_transaction_read_after_move_only(db):
-    seed = db.create(
-        title="A", summary="A", body="hello", rationale="seed", relpath="orig.md"
-    )
+def test_transaction_read_after_move_only(db, seed):
+    card = seed(title="A", summary="A", body="hello", relpath="orig.md")
     with db.transaction(rationale="read after move-only") as tx:
-        tx.move(seed.id, "moved.md")
-        card = tx.read(seed.id)
-        assert card.body == "hello"
+        tx.move(card.id, "moved.md")
+        c = tx.read(card.id)
+        assert c.body == "hello"
 
 
-def test_transaction_modify_after_delete_raises(db):
-    seed = db.create(title="A", summary="A", rationale="seed")
+def test_transaction_modify_after_delete_raises(db, seed):
+    card = seed(title="A", summary="A")
     with db.transaction(rationale="modify-after-delete") as tx:
-        tx.delete(seed.id)
+        tx.delete(card.id)
         with pytest.raises(KeyError):
-            tx.read(seed.id)
+            tx.read(card.id)
         with pytest.raises(KeyError):
-            tx.update(seed, summary="x")
+            tx.update(card, summary="x")
         with pytest.raises(KeyError):
-            tx.move(seed.id, "new.md")
+            tx.move(card.id, "new.md")
 
 
-def test_transaction_move_into_staged_deleted_slot_raises(db):
-    a = db.create(title="A", summary="A", relpath="slot.md", rationale="seed-a")
-    b = db.create(title="B", summary="B", relpath="other.md", rationale="seed-b")
+def test_transaction_move_into_staged_deleted_slot_raises(db, seed):
+    a = seed(title="A", summary="A", relpath="slot.md")
+    b = seed(title="B", summary="B", relpath="other.md")
     with db.transaction(rationale="move into deleted slot") as tx:
         tx.delete(a.id)
         with pytest.raises(FileExistsError):
@@ -291,65 +252,63 @@ def test_transaction_move_staged_create(db):
     assert (db.root / "moved.md").exists()
 
 
-def test_transaction_move_same_path_is_noop(db):
-    seed = db.create(title="A", summary="A", rationale="seed")
-    current = db._relpath(seed.id)
+def test_transaction_move_same_path_is_noop(db, seed):
+    card = seed(title="A", summary="A")
+    current = db._relpath(card.id)
     before = _git_log_count(db)
     with db.transaction(rationale="self move") as tx:
-        tx.move(seed.id, current)
+        tx.move(card.id, current)
     assert _git_log_count(db) == before
 
 
-def test_transaction_create_into_move_away_slot_raises(db):
-    a = db.create(title="A", summary="A", relpath="orig.md", rationale="seed-a")
+def test_transaction_create_into_move_away_slot_raises(db, seed):
+    a = seed(title="A", summary="A", relpath="orig.md")
     with db.transaction(rationale="create into move-away") as tx:
         tx.move(a.id, "new.md")
         with pytest.raises(FileExistsError):
             tx.create(title="B", summary="B", relpath="orig.md")
 
 
-def test_transaction_move_into_move_away_slot_raises(db):
-    a = db.create(title="A", summary="A", relpath="orig.md", rationale="seed-a")
-    b = db.create(title="B", summary="B", relpath="other.md", rationale="seed-b")
+def test_transaction_move_into_move_away_slot_raises(db, seed):
+    a = seed(title="A", summary="A", relpath="orig.md")
+    b = seed(title="B", summary="B", relpath="other.md")
     with db.transaction(rationale="move into move-away") as tx:
         tx.move(a.id, "new.md")
         with pytest.raises(FileExistsError):
             tx.move(b.id, "orig.md")
 
 
-def test_transaction_update_then_move(db):
-    seed = db.create(
-        title="A", summary="A", body="x", rationale="seed", relpath="orig.md"
-    )
+def test_transaction_update_then_move(db, seed):
+    card = seed(title="A", summary="A", body="x", relpath="orig.md")
     with db.transaction(rationale="update+move") as tx:
-        seed.body = "y"
-        tx.update(seed, summary="A-updated")
-        tx.move(seed.id, "moved.md")
+        card.body = "y"
+        tx.update(card, summary="A-updated")
+        tx.move(card.id, "moved.md")
     assert not (db.root / "orig.md").exists()
     assert (db.root / "moved.md").exists()
-    again = db.read(seed.id)
+    again = db.read(card.id)
     assert again.body == "y"
     assert again.summary == "A-updated"
 
 
-def test_transaction_delete_after_staged_move(db):
-    seed = db.create(title="A", summary="A", relpath="orig.md", rationale="seed")
+def test_transaction_delete_after_staged_move(db, seed):
+    card = seed(title="A", summary="A", relpath="orig.md")
     with db.transaction(rationale="move then delete") as tx:
-        tx.move(seed.id, "moved.md")
-        tx.delete(seed.id)
+        tx.move(card.id, "moved.md")
+        tx.delete(card.id)
     assert not (db.root / "orig.md").exists()
     assert not (db.root / "moved.md").exists()
     with pytest.raises(KeyError):
-        db.read(seed.id)
+        db.read(card.id)
 
 
-def test_transaction_read_returns_deep_copy_for_updates(db):
-    seed = db.create(title="A", summary="A", yaml={"tags": []}, rationale="seed")
+def test_transaction_read_returns_deep_copy_for_updates(db, seed):
+    card = seed(title="A", summary="A", yaml={"tags": []})
     with db.transaction(rationale="deep copy update") as tx:
-        seed.body = "changed"
-        returned = tx.update(seed, summary="A")
+        card.body = "changed"
+        returned = tx.update(card, summary="A")
         returned.yaml["tags"].append("shed")
-    again = db.read(seed.id)
+    again = db.read(card.id)
     assert again.body == "changed"
     assert again.yaml["tags"] == []
 
@@ -382,9 +341,9 @@ def test_transaction_active_tx_cleared_after_sqlite_failure(db, monkeypatch):
     assert (db.root / "b.md").exists()
 
 
-def test_transaction_move_into_committed_unstaged_card_relpath_raises(db):
-    a = db.create(title="A", summary="A", relpath="alpha.md", rationale="seed-a")
-    b = db.create(title="B", summary="B", relpath="beta.md", rationale="seed-b")
+def test_transaction_move_into_committed_unstaged_card_relpath_raises(db, seed):
+    a = seed(title="A", summary="A", relpath="alpha.md")
+    b = seed(title="B", summary="B", relpath="beta.md")
     with db.transaction(rationale="move into committed") as tx:
         with pytest.raises(FileExistsError):
             tx.move(a.id, "beta.md")
@@ -392,43 +351,43 @@ def test_transaction_move_into_committed_unstaged_card_relpath_raises(db):
     assert db._relpath(b.id) == "beta.md"
 
 
-def test_transaction_move_away_and_back_collapses(db):
-    seed = db.create(title="A", summary="A", relpath="orig.md", rationale="seed")
+def test_transaction_move_away_and_back_collapses(db, seed):
+    card = seed(title="A", summary="A", relpath="orig.md")
     before = _git_log_count(db)
     with db.transaction(rationale="move away and back") as tx:
-        tx.move(seed.id, "new.md")
-        tx.move(seed.id, "orig.md")
+        tx.move(card.id, "new.md")
+        tx.move(card.id, "orig.md")
     assert _git_log_count(db) == before
     assert (db.root / "orig.md").exists()
     assert not (db.root / "new.md").exists()
 
 
-def test_transaction_update_input_card_is_copied(db):
-    seed = db.create(title="A", summary="A", yaml={"tags": []}, rationale="seed")
+def test_transaction_update_input_card_is_copied(db, seed):
+    card = seed(title="A", summary="A", yaml={"tags": []})
     with db.transaction(rationale="input copy") as tx:
-        seed.body = "changed"
-        tx.update(seed, summary=seed.summary)
-        seed.yaml["tags"].append("shed")
-    again = db.read(seed.id)
+        card.body = "changed"
+        tx.update(card, summary=card.summary)
+        card.yaml["tags"].append("shed")
+    again = db.read(card.id)
     assert again.body == "changed"
     assert again.yaml["tags"] == []
 
 
-def test_transaction_read_after_move_plus_update(db):
-    seed = db.create(title="A", summary="A", rationale="seed")
+def test_transaction_read_after_move_plus_update(db, seed):
+    card = seed(title="A", summary="A")
     with db.transaction(rationale="move+update read") as tx:
-        tx.update(seed, summary="new")
-        tx.move(seed.id, "moved.md")
-        card = tx.read(seed.id)
-        assert card.summary == "new"
+        tx.update(card, summary="new")
+        tx.move(card.id, "moved.md")
+        c = tx.read(card.id)
+        assert c.summary == "new"
 
 
-def test_transaction_move_collision_against_staged_create(db):
-    seed = db.create(title="A", summary="A", relpath="orig.md", rationale="seed")
+def test_transaction_move_collision_against_staged_create(db, seed):
+    card = seed(title="A", summary="A", relpath="orig.md")
     with db.transaction(rationale="move collide staged create") as tx:
         tx.create(title="B", summary="B", relpath="claimed.md")
         with pytest.raises(FileExistsError):
-            tx.move(seed.id, "claimed.md")
+            tx.move(card.id, "claimed.md")
 
 
 def test_transaction_read_after_create_then_delete_in_buffer_raises(db):

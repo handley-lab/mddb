@@ -141,10 +141,30 @@ class MDDB:
 
 
 @dataclass
-class _Staged:
-    card: Card | None
-    original_relpath: str | None
-    relpath: str | None
+class _Create:
+    card: Card
+    relpath: str
+
+
+@dataclass
+class _Update:
+    card: Card
+    original_relpath: str
+    relpath: str
+
+
+@dataclass
+class _Move:
+    original_relpath: str
+    relpath: str
+
+
+@dataclass
+class _Delete:
+    original_relpath: str
+
+
+_Staged = _Create | _Update | _Move | _Delete
 
 
 class _Editor:
@@ -188,20 +208,21 @@ class _Editor:
         SQLite cache sync (insert/update/delete inside ``with self._db.conn:``).
         """
         for staged in self._staged.values():
-            if staged.card is None and staged.relpath is None:
+            if not isinstance(staged, (_Create, _Update, _Move, _Delete)):
+                raise TypeError(f"unknown staged variant: {type(staged).__name__}")
+        for staged in self._staged.values():
+            if isinstance(staged, _Delete):
                 self._db._git("rm", "--", staged.original_relpath)
         for staged in self._staged.values():
-            if (
-                staged.original_relpath is not None
-                and staged.relpath is not None
-                and staged.relpath != staged.original_relpath
+            if isinstance(staged, (_Move, _Update)) and (
+                staged.relpath != staged.original_relpath
             ):
                 (self._db.root / staged.relpath).parent.mkdir(
                     parents=True, exist_ok=True
                 )
                 self._db._git("mv", "--", staged.original_relpath, staged.relpath)
         for staged in self._staged.values():
-            if staged.card is not None and staged.relpath is not None:
+            if isinstance(staged, (_Create, _Update)):
                 target = self._db.root / staged.relpath
                 target.parent.mkdir(parents=True, exist_ok=True)
                 tmp = target.with_suffix(target.suffix + f".{uuid.uuid4().hex}.tmp")
@@ -211,15 +232,17 @@ class _Editor:
         self._db._git("commit", "-m", self._rationale)
         with self._db.conn:
             for card_id, staged in self._staged.items():
-                if staged.card is None and staged.relpath is None:
+                if isinstance(staged, _Delete):
                     _index.delete(self._db.conn, card_id)
-                elif staged.original_relpath is None:
+                elif isinstance(staged, _Create):
                     _index.insert(self._db.conn, staged.card, staged.relpath)
-                elif staged.card is None:
+                elif isinstance(staged, _Move):
                     _index.update_relpath(self._db.conn, card_id, staged.relpath)
-                else:
+                elif isinstance(staged, _Update):
                     _index.update_relpath(self._db.conn, card_id, staged.relpath)
                     _index.update_content(self._db.conn, staged.card)
+                else:
+                    raise TypeError(f"unknown staged variant: {type(staged).__name__}")
 
     def create(
         self,
@@ -281,13 +304,11 @@ class _Editor:
         if self._claim_for(resolved) is not None:
             raise FileExistsError(resolved)
         if (self._db.root / resolved).exists() and not any(
-            s.original_relpath == resolved and s.card is None and s.relpath is None
+            isinstance(s, _Delete) and s.original_relpath == resolved
             for s in self._staged.values()
         ):
             raise FileExistsError(resolved)
-        self._staged[new_card.id] = _Staged(
-            card=new_card, original_relpath=None, relpath=resolved
-        )
+        self._staged[new_card.id] = _Create(card=new_card, relpath=resolved)
         return new_card.copy()
 
     def read(self, card_id: str) -> Card:
@@ -295,13 +316,15 @@ class _Editor:
         if self._closed:
             raise RuntimeError("editor already closed")
         staged = self._staged.get(card_id)
-        if staged is not None:
-            if staged.card is None and staged.relpath is None:
-                raise KeyError(card_id)
-            if staged.card is not None:
-                return staged.card.copy()
+        if staged is None:
+            return self._db.read(card_id)
+        if isinstance(staged, _Delete):
+            raise KeyError(card_id)
+        if isinstance(staged, (_Create, _Update)):
+            return staged.card.copy()
+        if isinstance(staged, _Move):
             return self._db.read(card_id).copy()
-        return self._db.read(card_id)
+        raise TypeError(f"unknown staged variant: {type(staged).__name__}")
 
     def update(
         self,
@@ -324,15 +347,14 @@ class _Editor:
         """
         if self._closed:
             raise RuntimeError("editor already closed")
+        if isinstance(self._staged.get(card.id), _Delete):
+            raise KeyError(card.id)
         card.yaml["summary"] = summary
         if tags is not None:
             if tags:
                 card.yaml["tags"] = list(tags)
             elif "tags" in card.yaml:
                 del card.yaml["tags"]
-        staged = self._staged.get(card.id)
-        if staged is not None and staged.card is None and staged.relpath is None:
-            raise KeyError(card.id)
         self._stage_content_update(card)
         return card.copy()
 
@@ -389,36 +411,39 @@ class _Editor:
         staged = self._staged.get(card.id)
         if staged is None:
             original = _index.relpath_of(self._db.conn, card.id)
-            self._staged[card.id] = _Staged(
+            self._staged[card.id] = _Update(
                 card=staged_card, original_relpath=original, relpath=original
             )
-        else:
-            self._staged[card.id] = _Staged(
+        elif isinstance(staged, _Create):
+            self._staged[card.id] = _Create(card=staged_card, relpath=staged.relpath)
+        elif isinstance(staged, (_Update, _Move)):
+            self._staged[card.id] = _Update(
                 card=staged_card,
                 original_relpath=staged.original_relpath,
                 relpath=staged.relpath,
             )
+        else:
+            raise TypeError(f"unknown staged variant: {type(staged).__name__}")
 
     def delete(self, card_id: str) -> None:
         """Stage a delete of ``card_id``."""
         if self._closed:
             raise RuntimeError("editor already closed")
         staged = self._staged.get(card_id)
-        if staged is not None and staged.card is None and staged.relpath is None:
+        if isinstance(staged, _Delete):
             raise KeyError(card_id)
-        if staged is not None and staged.original_relpath is None:
+        if isinstance(staged, _Create):
             del self._staged[card_id]
             return
-        if staged is not None:
-            self._staged[card_id] = _Staged(
-                card=None, original_relpath=staged.original_relpath, relpath=None
+        if isinstance(staged, (_Update, _Move)):
+            self._staged[card_id] = _Delete(original_relpath=staged.original_relpath)
+            return
+        if staged is None:
+            self._staged[card_id] = _Delete(
+                original_relpath=_index.relpath_of(self._db.conn, card_id),
             )
             return
-        self._staged[card_id] = _Staged(
-            card=None,
-            original_relpath=_index.relpath_of(self._db.conn, card_id),
-            relpath=None,
-        )
+        raise TypeError(f"unknown staged variant: {type(staged).__name__}")
 
     def move(self, card_id: str, new_relpath: str) -> None:
         """Stage a relpath change for ``card_id``.
@@ -433,47 +458,61 @@ class _Editor:
         if not new_relpath.endswith(".md"):
             raise ValueError(f"relpath must end in .md: {new_relpath}")
         staged = self._staged.get(card_id)
-        if staged is not None and staged.card is None and staged.relpath is None:
+        if isinstance(staged, _Delete):
             raise KeyError(card_id)
-        if staged is not None:
+        if staged is None:
+            current = _index.relpath_of(self._db.conn, card_id)
+        elif isinstance(staged, _Create):
+            current = staged.relpath
+        elif isinstance(staged, (_Update, _Move)):
             current = staged.relpath
         else:
-            current = _index.relpath_of(self._db.conn, card_id)
+            raise TypeError(f"unknown staged variant: {type(staged).__name__}")
         if new_relpath == current:
             return
         if self._claim_for(new_relpath) is not None:
             raise FileExistsError(new_relpath)
         if (self._db.root / new_relpath).exists():
-            if staged is None or staged.original_relpath != new_relpath:
+            original_relpath = (
+                staged.original_relpath
+                if isinstance(staged, (_Update, _Move))
+                else None
+            )
+            if original_relpath != new_relpath:
                 raise FileExistsError(new_relpath)
         if staged is None:
-            new_record = _Staged(
-                card=None,
+            self._staged[card_id] = _Move(
                 original_relpath=_index.relpath_of(self._db.conn, card_id),
                 relpath=new_relpath,
             )
-        elif staged.original_relpath is None:
-            new_record = _Staged(
-                card=staged.card, original_relpath=None, relpath=new_relpath
-            )
-        else:
-            new_record = _Staged(
+            return
+        if isinstance(staged, _Create):
+            self._staged[card_id] = _Create(card=staged.card, relpath=new_relpath)
+            return
+        if isinstance(staged, _Update):
+            self._staged[card_id] = _Update(
                 card=staged.card,
                 original_relpath=staged.original_relpath,
                 relpath=new_relpath,
             )
-        if (
-            new_record.card is None
-            and new_record.original_relpath is not None
-            and new_record.relpath == new_record.original_relpath
-        ):
-            if card_id in self._staged:
-                del self._staged[card_id]
             return
-        self._staged[card_id] = new_record
+        if isinstance(staged, _Move):
+            if new_relpath == staged.original_relpath:
+                del self._staged[card_id]
+                return
+            self._staged[card_id] = _Move(
+                original_relpath=staged.original_relpath, relpath=new_relpath
+            )
+            return
+        raise TypeError(f"unknown staged variant: {type(staged).__name__}")
 
     def _claim_for(self, relpath: str) -> str | None:
-        for card_id, s in self._staged.items():
-            if s.relpath == relpath:
-                return card_id
+        for card_id, staged in self._staged.items():
+            if isinstance(staged, (_Create, _Update, _Move)):
+                if staged.relpath == relpath:
+                    return card_id
+            elif isinstance(staged, _Delete):
+                continue
+            else:
+                raise TypeError(f"unknown staged variant: {type(staged).__name__}")
         return None

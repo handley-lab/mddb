@@ -874,3 +874,13 @@ def test_editor_move_requires_md_suffix(db, seed):
         with pytest.raises(ValueError, match="must end in .md"):
             editor.move(card.id, "inventory/shed")
     assert (db.root / "orig.md").exists()
+
+
+def test_editor_create_same_id_after_staged_delete_raises(db, seed):
+    card = seed(title="Old", summary="Old", yaml={"id": "fixed-id"})
+    with db.editor(rationale="same id after delete") as editor:
+        editor.delete(card.id)
+        with pytest.raises(RuntimeError, match="duplicate id"):
+            editor.create(
+                title="New", summary="New", yaml={"id": "fixed-id"}, relpath="new.md"
+            )

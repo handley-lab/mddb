@@ -151,14 +151,6 @@ class MDDB:
             ["git", *args], cwd=self.root, check=True, capture_output=True, text=True
         )
 
-    def _validate_relpath(self, relpath: str) -> None:
-        if not relpath.endswith(".md"):
-            raise ValueError(f"relpath must end in .md: {relpath}")
-        p = Path(relpath)
-        if p.is_absolute() or ".." in p.parts:
-            raise ValueError(f"invalid relpath: {relpath}")
-
-
 @dataclass
 class _Staged:
     card: Card | None
@@ -224,15 +216,9 @@ class _Edit:
             if relpath.endswith(".md")
             else os.path.join(relpath, f"{slugify(title)}.md")
         )
-        self._db._validate_relpath(resolved)
         new_id = new_card.id
         if new_id in self._staged:
             raise RuntimeError(f"duplicate id in edit: {new_id}")
-        row = self._db.conn.execute(
-            "SELECT 1 FROM entries WHERE id = ?", (new_id,)
-        ).fetchone()
-        if row is not None:
-            raise RuntimeError(f"id already exists: {new_id}")
         if resolved in self._relpaths:
             raise FileExistsError(resolved)
         if (self._db.root / resolved).exists() and not self._staged_delete_at(resolved):
@@ -314,7 +300,6 @@ class _Edit:
         """Stage a relpath change for ``card_id``."""
         if self._closed:
             raise RuntimeError("edit already closed")
-        self._db._validate_relpath(new_relpath)
         staged = self._staged.get(card_id)
         if staged is not None and staged.card is None and staged.relpath is None:
             raise KeyError(card_id)

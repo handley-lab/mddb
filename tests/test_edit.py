@@ -108,10 +108,12 @@ def test_edit_duplicate_id_in_buffer(db):
             edit.create(title="B", summary="B", yaml={"id": "fixed"})
 
 
-def test_edit_id_collision_against_db(db, seed):
+def test_edit_id_collision_against_db_fails_at_commit(db, seed):
+    import sqlite3
+
     seed(title="X", summary="seed", yaml={"id": "fixed-id"})
-    with db.edit(rationale="id collision db") as edit:
-        with pytest.raises(RuntimeError, match="id already exists"):
+    with pytest.raises(sqlite3.IntegrityError):
+        with db.edit(rationale="id collision db") as edit:
             edit.create(title="Y", summary="y", yaml={"id": "fixed-id"})
 
 

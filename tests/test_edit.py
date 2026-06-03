@@ -640,8 +640,7 @@ def test_tags_glob_pattern(db, seed):
     assert matched == {a.id, b.id}
 
 
-def test_tags_query_matches_any_tag_in_multi_tag_card(db, seed):
-    # Middle-position queried tag catches both first-only and last-only indexing bugs.
+def test_tags_query_matches_middle_tag_in_multi_tag_card(db, seed):
     multi = seed(
         title="A",
         summary="A",

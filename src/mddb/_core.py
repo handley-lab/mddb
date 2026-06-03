@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -176,15 +177,47 @@ class _Edit:
         yaml: dict | None = None,
         body: str = "",
         relpath: str = "",
+        tags: Sequence[str] | None = None,
     ) -> Card:
-        """Stage a new card for creation. Materialises on clean ``__exit__``."""
+        """Stage a new card for creation. Materialises on clean ``__exit__``.
+
+        On-disk YAML keys are written in canonical order: ``id``, ``title``,
+        ``summary``, ``tags`` (when present), then the caller's remaining
+        ``yaml=`` keys in their original relative order.
+
+        ``tags`` is a three-state kwarg:
+            - ``None`` (default): no override. Caller's ``yaml["tags"]`` is
+              preserved if present.
+            - empty sequence (``()``/``[]``): explicit clear; no ``tags``
+              key on the card even if ``yaml`` supplied one.
+            - non-empty sequence: replace; ``tags=`` wins over any
+              ``yaml["tags"]`` value.
+
+        Required kwargs (``title``, ``summary``) win over any matching keys
+        in ``yaml=``. ``id`` from ``yaml=`` is preserved verbatim (any
+        value); a UUIDv4 is generated only when ``id`` is absent.
+        """
         if self._closed:
             raise RuntimeError("edit already closed")
-        yaml_d = {} if yaml is None else dict(yaml)
+        caller_yaml = {} if yaml is None else dict(yaml)
+        caller_yaml.pop("title", None)
+        caller_yaml.pop("summary", None)
+        yaml_d = {}
+        if "id" in caller_yaml:
+            yaml_d["id"] = caller_yaml.pop("id")
+        else:
+            yaml_d["id"] = str(uuid.uuid4())
         yaml_d["title"] = title
         yaml_d["summary"] = summary
-        if "id" not in yaml_d:
-            yaml_d["id"] = str(uuid.uuid4())
+        if tags is None:
+            if "tags" in caller_yaml:
+                yaml_d["tags"] = caller_yaml.pop("tags")
+        elif tags:
+            yaml_d["tags"] = list(tags)
+            caller_yaml.pop("tags", None)
+        else:
+            caller_yaml.pop("tags", None)
+        yaml_d.update(caller_yaml)
         new_card = Card(yaml=yaml_d, body=body)
         resolved = (
             relpath
@@ -215,11 +248,33 @@ class _Edit:
             return self._db.read(card_id).copy()
         return self._db.read(card_id)
 
-    def update(self, card: Card, *, summary: str) -> Card:
-        """Stage an update to ``card``. Caller's ``Card`` is deep-copied before staging."""
+    def update(
+        self,
+        card: Card,
+        *,
+        summary: str,
+        tags: Sequence[str] | None = None,
+    ) -> Card:
+        """Stage an update to ``card``. Caller's ``Card`` is deep-copied before staging.
+
+        ``tags`` is a three-state kwarg with the same semantics as in
+        :meth:`create`:
+            - ``None`` (default): leave ``card.yaml["tags"]`` as-is. In-place
+              mutations made by the caller before calling ``update`` persist.
+            - empty sequence: remove the ``tags`` key from ``card.yaml`` (if
+              present).
+            - non-empty sequence: replace ``card.yaml["tags"]``.
+
+        Does NOT re-canonicalise existing YAML key order.
+        """
         if self._closed:
             raise RuntimeError("edit already closed")
         card.yaml["summary"] = summary
+        if tags is not None:
+            if tags:
+                card.yaml["tags"] = list(tags)
+            elif "tags" in card.yaml:
+                del card.yaml["tags"]
         staged = self._staged.get(card.id)
         if staged is not None and staged.card is None and staged.relpath is None:
             raise KeyError(card.id)

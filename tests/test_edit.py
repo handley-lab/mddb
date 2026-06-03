@@ -416,3 +416,172 @@ def test_edit_closed_after_commit_phase_failure(db, monkeypatch):
     with pytest.raises(RuntimeError, match="already closed"):
         with edit:
             pass
+
+
+def test_edit_create_tags_kwarg_basic(db):
+    with db.edit(rationale="tags basic") as edit:
+        card = edit.create(
+            title="A", summary="A", tags=["area/work", "topic/cosmology"]
+        )
+    again = db.read(card.id)
+    assert again.tags == ["area/work", "topic/cosmology"]
+
+
+def test_edit_create_no_tags_omits_key(db):
+    with db.edit(rationale="no tags") as edit:
+        card = edit.create(title="A", summary="A")
+    assert "tags" not in db.read(card.id).yaml
+
+
+def test_edit_create_empty_tuple_omits_key(db):
+    with db.edit(rationale="empty tuple") as edit:
+        card = edit.create(title="A", summary="A", tags=())
+    assert "tags" not in db.read(card.id).yaml
+
+
+def test_edit_create_empty_list_omits_key(db):
+    with db.edit(rationale="empty list") as edit:
+        card = edit.create(title="A", summary="A", tags=[])
+    assert "tags" not in db.read(card.id).yaml
+
+
+def test_edit_create_tags_kwarg_wins_over_yaml(db):
+    with db.edit(rationale="kwarg wins") as edit:
+        card = edit.create(title="A", summary="A", yaml={"tags": ["x"]}, tags=["y"])
+    assert db.read(card.id).tags == ["y"]
+
+
+def test_edit_create_empty_tags_clears_yaml_tags(db):
+    with db.edit(rationale="empty clears") as edit:
+        card = edit.create(title="A", summary="A", yaml={"tags": ["x"]}, tags=())
+    assert "tags" not in db.read(card.id).yaml
+
+
+def test_edit_create_none_tags_preserves_yaml_tags(db):
+    with db.edit(rationale="preserve yaml") as edit:
+        card = edit.create(title="A", summary="A", yaml={"tags": ["x"]}, tags=None)
+    assert db.read(card.id).tags == ["x"]
+
+
+def test_edit_create_omitted_tags_preserves_yaml_tags(db):
+    with db.edit(rationale="implicit preserve") as edit:
+        card = edit.create(title="A", summary="A", yaml={"tags": ["x"]})
+    assert db.read(card.id).tags == ["x"]
+
+
+def test_edit_create_yaml_empty_tags_preserved(db):
+    with db.edit(rationale="raw empty preserved") as edit:
+        card = edit.create(title="A", summary="A", yaml={"tags": []})
+    assert db.read(card.id).yaml["tags"] == []
+
+
+def test_edit_create_required_kwargs_win_over_yaml(db):
+    with db.edit(rationale="kwargs win") as edit:
+        card = edit.create(
+            title="from kwarg",
+            summary="kwarg summary",
+            yaml={"title": "from yaml", "summary": "yaml summary"},
+        )
+    again = db.read(card.id)
+    assert again.title == "from kwarg"
+    assert again.summary == "kwarg summary"
+
+
+def test_edit_create_caller_supplied_id_preserved(db):
+    with db.edit(rationale="caller id") as edit:
+        card = edit.create(title="A", summary="A", yaml={"id": "fixed-id"})
+    assert card.id == "fixed-id"
+
+
+def test_edit_create_falsey_id_not_replaced(db):
+    with db.edit(rationale="empty id") as edit:
+        card = edit.create(title="A", summary="A", yaml={"id": ""})
+    assert card.yaml["id"] == ""
+
+
+def test_edit_create_canonical_key_order_on_disk(db):
+    with db.edit(rationale="canonical order") as edit:
+        card = edit.create(
+            title="A",
+            summary="A",
+            yaml={"location": "shed", "z": 1, "tags": ["x"]},
+            tags=["y"],
+        )
+    relpath = _index.relpath_of(db.conn, card.id)
+    text = (db.root / relpath).read_text()
+    fm_keys = [
+        line.split(":", 1)[0]
+        for line in text.split("---\n")[1].splitlines()
+        if ":" in line and not line.startswith(" ")
+    ]
+    assert fm_keys[:4] == ["id", "title", "summary", "tags"]
+    assert "location" in fm_keys
+    assert "z" in fm_keys
+
+
+def test_edit_update_no_tags_kwarg_preserves_existing(db, seed):
+    card = seed(title="A", summary="A", tags=["original"])
+    card.body = "changed"
+    with db.edit(rationale="no override") as edit:
+        edit.update(card, summary=card.summary)
+    assert db.read(card.id).tags == ["original"]
+
+
+def test_edit_update_no_tags_kwarg_when_card_has_no_tags(db, seed):
+    card = seed(title="A", summary="A")
+    card.body = "changed"
+    with db.edit(rationale="no override no tags") as edit:
+        edit.update(card, summary=card.summary)
+    assert "tags" not in db.read(card.id).yaml
+
+
+def test_edit_update_replaces_tags(db, seed):
+    card = seed(title="A", summary="A", tags=["original"])
+    with db.edit(rationale="replace") as edit:
+        edit.update(card, summary=card.summary, tags=["replacement"])
+    assert db.read(card.id).tags == ["replacement"]
+
+
+def test_edit_update_empty_tags_removes_key_on_disk(db, seed):
+    card = seed(title="A", summary="A", tags=["x"])
+    with db.edit(rationale="clear") as edit:
+        edit.update(card, summary=card.summary, tags=())
+    relpath = _index.relpath_of(db.conn, card.id)
+    assert "tags:" not in (db.root / relpath).read_text()
+    assert "tags" not in db.read(card.id).yaml
+
+
+def test_edit_update_empty_tags_removes_index_rows(db, seed):
+    card = seed(title="A", summary="A", tags=["x", "y"])
+    with db.edit(rationale="clear index") as edit:
+        edit.update(card, summary=card.summary, tags=())
+    rows = db.conn.execute(
+        "SELECT value_str FROM entry_fields f "
+        "JOIN entries e ON e.rowid = f.entry_rowid "
+        "WHERE e.id = ? AND f.key = 'tags'",
+        (card.id,),
+    ).fetchall()
+    assert rows == []
+
+
+def test_edit_update_empty_tags_on_untagged_card_noops(db, seed):
+    card = seed(title="A", summary="A")
+    card.body = "changed"
+    with db.edit(rationale="clear untagged") as edit:
+        edit.update(card, summary=card.summary, tags=())
+    assert "tags" not in db.read(card.id).yaml
+
+
+def test_edit_update_in_place_mutation_persists(db, seed):
+    card = seed(title="A", summary="A", tags=["original"])
+    card.yaml["tags"].append("added")
+    with db.edit(rationale="in-place") as edit:
+        edit.update(card, summary=card.summary)
+    assert db.read(card.id).tags == ["original", "added"]
+
+
+def test_edit_create_omit_empty_disk_text(db):
+    with db.edit(rationale="omit empty disk") as edit:
+        card = edit.create(title="A", summary="A", tags=())
+    relpath = _index.relpath_of(db.conn, card.id)
+    assert "tags:" not in (db.root / relpath).read_text()

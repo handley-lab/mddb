@@ -934,3 +934,16 @@ def test_editor_create_rejects_in_root_symlink_alias(db):
     with db.editor(rationale="reject in-root symlink alias") as editor:
         with pytest.raises(ValueError, match="relative and canonical"):
             editor.create(title="A", summary="A", relpath="link/card.md")
+
+
+def test_editor_commit_does_not_sweep_unrelated_staged_changes(db):
+    unrelated = db.root / "unrelated.txt"
+    unrelated.write_text("not a card\n")
+    db._git("add", "--", "unrelated.txt")
+    with db.editor(rationale="card only") as editor:
+        editor.create(title="A", summary="A")
+    out = db._git("show", "--name-only", "--pretty=format:", "HEAD").stdout
+    committed = {line.strip() for line in out.splitlines() if line.strip()}
+    assert committed == {"a.md"}
+    status = db._git("status", "--porcelain").stdout
+    assert "A  unrelated.txt" in status

@@ -224,13 +224,17 @@ class _Editor:
 
         Phases: filesystem deletes → moves → writes/adds → git commit →
         SQLite cache sync (insert/update/delete inside ``with self._db.conn:``).
+        The git commit is path-restricted to the relpaths this editor touched
+        so unrelated pre-staged changes in the working tree stay staged.
         """
         for staged in self._staged.values():
             if not isinstance(staged, (_Create, _Update, _Move, _Delete)):
                 raise TypeError(f"unknown staged variant: {type(staged).__name__}")
+        touched: set[str] = set()
         for staged in self._staged.values():
             if isinstance(staged, _Delete):
                 self._db._git("rm", "--", staged.original_relpath)
+                touched.add(staged.original_relpath)
         for staged in self._staged.values():
             if isinstance(staged, (_Move, _Update)) and (
                 staged.relpath != staged.original_relpath
@@ -239,6 +243,8 @@ class _Editor:
                     parents=True, exist_ok=True
                 )
                 self._db._git("mv", "--", staged.original_relpath, staged.relpath)
+                touched.add(staged.original_relpath)
+                touched.add(staged.relpath)
         for staged in self._staged.values():
             if isinstance(staged, (_Create, _Update)):
                 target = self._db.root / staged.relpath
@@ -247,7 +253,8 @@ class _Editor:
                 tmp.write_text(str(staged.card))
                 os.replace(tmp, target)
                 self._db._git("add", "--", staged.relpath)
-        self._db._git("commit", "-m", self._rationale)
+                touched.add(staged.relpath)
+        self._db._git("commit", "-m", self._rationale, "--", *sorted(touched))
         with self._db.conn:
             for card_id, staged in self._staged.items():
                 if isinstance(staged, _Delete):

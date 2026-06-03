@@ -168,7 +168,7 @@ All mutation flows through `db.editor()`. The commit phase, on clean `__exit__`:
 1. `git rm` staged deletes.
 2. `git mv` staged moves (parent dirs created as needed).
 3. Write staged creates/updates via temp file + `os.replace`, then `git add`.
-4. One `git commit -m <rationale>`.
+4. One `git commit -m <rationale> -- <touched paths>` (path-restricted so unrelated pre-staged changes in the caller's working tree stay staged).
 5. SQLite insert/update/delete inside `with self.conn:`. If this raises, `sqlite3.Error` propagates and the cache may be left stale.
 
 The next `MDDB(path)` opens the cache if `meta.schema_version` matches; if missing or different version, it rebuilds from `.md` files on disk. There is no automatic stale-cache detection. If a SQLite mutation fails and you want a fresh index, `rm ~/.cache/mddb/<sha1(abs-path)>/index.sqlite` and reopen.
@@ -337,5 +337,6 @@ Other ruff defaults are left alone.
 - `id` is immutable.
 - `relpath` must not collide.
 - `relpath` must be relative, canonical (no `.` or `..` path parts), inside the mddb root after symlink resolution, AND textually equal to its resolved relative path (no symlink aliases). Validated at `create` and `move`; other operations preserve the existing relpath. Violations raise `ValueError` — the substrate refuses to store a relpath the cache rebuild can't reproduce.
+- `editor` commits only the paths it touched (via `git commit -- <paths>`); pre-staged unrelated changes in the caller's working tree are left staged, not swept into the editor's commit.
 - SQLite is disposable; `.md` files and git are truth.
 - Concurrent writers from another process are outside the prototype contract.

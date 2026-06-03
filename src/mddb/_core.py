@@ -12,8 +12,10 @@ from pathlib import Path
 
 import yaml as pyyaml
 
+from slugify import slugify
+
 from . import index
-from .card import Card, slugify
+from .card import Card
 
 
 @dataclass

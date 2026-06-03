@@ -8,16 +8,7 @@ from pathlib import Path
 
 import yaml
 
-
-def slugify(text: str) -> str:
-    """Convert a title to a filesystem-safe slug.
-
-    Lowercases, replaces runs of non-word characters with single hyphens,
-    strips leading/trailing hyphens. Returns ``"untitled"`` if the result
-    is empty.
-    """
-    slug = re.sub(r"\W+", "-", text.lower()).strip("-")
-    return slug or "untitled"
+_FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n(.*)", re.DOTALL)
 
 
 @dataclass
@@ -67,17 +58,9 @@ class Card:
 
         The text must begin with ``---\n`` and contain a closing ``\n---\n``
         separator before the body.
-
-        Raises:
-            ValueError: Missing opening frontmatter delimiter or no closing
-                separator.
         """
-        if not text.startswith("---\n"):
-            raise ValueError("missing opening frontmatter delimiter")
-        end = text.index("\n---\n", 4)
-        fm = yaml.safe_load(text[4 : end + 1])
-        body = text[end + 5 :]
-        return cls(yaml=fm, body=body)
+        fm_text, body = _FRONTMATTER.match(text).groups()
+        return cls(yaml=yaml.safe_load(fm_text), body=body)
 
     def __str__(self) -> str:
         """Serialise the card to its on-disk file form (frontmatter + body)."""

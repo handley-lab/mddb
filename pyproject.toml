@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mddb"
-version = "0.0.3"
+version = "0.0.4"
 description = "A YAML+markdown card substrate for agentic and human knowledge work"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,7 +13,7 @@ authors = [
     {name = "Handley Research Group", email = "wh260@cam.ac.uk"}
 ]
 keywords = ["knowledge", "agents", "yaml", "markdown", "substrate"]
-dependencies = ["pyyaml>=6.0"]
+dependencies = ["pyyaml>=6.0", "python-slugify>=8.0"]
 classifiers = [
     "Development Status :: 1 - Planning",
     "Intended Audience :: Developers",

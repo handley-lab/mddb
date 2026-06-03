@@ -9,7 +9,7 @@ Cards live as `.md` files in a directory under git. A derived SQLite index at `~
 ```python
 import mddb
 
-db = mddb.MDDB("~/my-mddb")
+db = mddb.MDDB.init("~/my-mddb")  # or mddb.MDDB(path) to open an existing one
 
 with db.edit(rationale="bought today") as edit:
     card = edit.create(

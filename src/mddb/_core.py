@@ -9,42 +9,34 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-import yaml as pyyaml
-
 from slugify import slugify
 
-from . import index
+from . import _index
 from .card import Card
 
 
 class MDDB:
     def __init__(self, path: Path | str):
-        """Open an existing mddb at ``path`` or initialise a fresh one in place.
-
-        If ``path/.git`` exists the directory is treated as an existing mddb
-        root and opened. Otherwise ``path`` is created (``mkdir -p``), ``git
-        init`` is run, a ``.gitignore`` containing ``*.tmp`` is committed,
-        and a one-line notice is printed to stderr so a typoed path is
-        visible before any data is written.
-
-        Args:
-            path: Filesystem path to the mddb directory. ``~`` is expanded
-                and the path is resolved to an absolute form.
-
-        Raises:
-            subprocess.CalledProcessError: ``git`` is not installed or fails
-                during initialisation.
-        """
+        """Open the mddb at ``path``. Use :meth:`init` to bootstrap a fresh one."""
         self.root = Path(path).expanduser().resolve()
-        if not (self.root / ".git").exists():
-            self.root.mkdir(parents=True, exist_ok=True)
-            self._git("init", "-q", "-b", "master")
-            (self.root / ".gitignore").write_text("*.tmp\n")
-            self._git("add", "--", ".gitignore")
-            self._git("commit", "-m", "initial commit")
-            print(f"mddb: initialised new mddb at {self.root}", file=sys.stderr)
-        self.conn = index.open_index(self.root)
+        self.conn = _index.open_index(self.root)
         self._active_edit: _Edit | None = None
+
+    @classmethod
+    def init(cls, path: Path | str) -> MDDB:
+        """Bootstrap a fresh mddb at ``path``.
+
+        Creates the directory (``mkdir -p``), runs ``git init``, commits a
+        ``.gitignore`` containing ``*.tmp``, and returns the opened handle.
+        """
+        root = Path(path).expanduser().resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        db = cls(root)
+        db._git("init", "-q", "-b", "master")
+        (root / ".gitignore").write_text("*.tmp\n")
+        db._git("add", "--", ".gitignore")
+        db._git("commit", "-q", "-m", "initial commit")
+        return db
 
     def read(self, card_id: str) -> Card:
         """Read a card by id, returning a fresh :class:`Card` from disk.
@@ -60,11 +52,11 @@ class MDDB:
             The :class:`Card` as parsed from its current file.
 
         Raises:
-            KeyError: No card with that ``id`` is known to the index.
+            KeyError: No card with that ``id`` is known to the _index.
             FileNotFoundError: The index points at a path that no longer
                 exists on disk.
         """
-        return Card.from_file(self.root / self._relpath(card_id))
+        return Card.from_file(self.root / _index.relpath_of(self.conn, card_id))
 
     def list(self) -> list[dict]:
         """Return every card's id, title, and summary — the progressive-disclosure summary view.
@@ -78,15 +70,7 @@ class MDDB:
             dicts, one per card. ``title`` and ``summary`` come back as
             ``None`` for cards missing those keys.
         """
-        rows = self.conn.execute(
-            "SELECT entries.id, t.value_str, s.value_str FROM entries "
-            "LEFT JOIN entry_fields t ON t.entry_rowid = entries.rowid AND t.key = 'title' "
-            "LEFT JOIN entry_fields s ON s.entry_rowid = entries.rowid AND s.key = 'summary'"
-        ).fetchall()
-        return [
-            {"id": cid, "title": title, "summary": summary}
-            for cid, title, summary in rows
-        ]
+        return _index.list_progressive(self.conn)
 
     def history(self, card_id: str) -> list[dict]:
         """Return the commit history of a card, newest first.
@@ -107,10 +91,10 @@ class MDDB:
               ``rationale`` passed to the mutating verb).
 
         Raises:
-            KeyError: No card with that ``id`` is known to the index.
+            KeyError: No card with that ``id`` is known to the _index.
             subprocess.CalledProcessError: ``git log`` failed.
         """
-        relpath = self._relpath(card_id)
+        relpath = _index.relpath_of(self.conn, card_id)
         out = self._git(
             "log",
             "--follow",
@@ -137,14 +121,6 @@ class MDDB:
         materialised as one git commit + one SQLite transaction.
         """
         return _Edit(self, rationale)
-
-    def _relpath(self, card_id: str) -> str:
-        row = self.conn.execute(
-            "SELECT relpath FROM entries WHERE id = ?", (card_id,)
-        ).fetchone()
-        if row is None:
-            raise KeyError(card_id)
-        return row[0]
 
     def _git(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -253,7 +229,7 @@ class _Edit:
             raise KeyError(card_id)
         staged_card = card.copy()
         if staged is None:
-            original = self._db._relpath(card_id)
+            original = _index.relpath_of(self._db.conn, card_id)
             self._staged[card_id] = _Staged(
                 card=staged_card, original_relpath=original, relpath=original
             )
@@ -291,7 +267,7 @@ class _Edit:
                 card=None, original_relpath=staged.original_relpath, relpath=None
             )
             return
-        original = self._db._relpath(card_id)
+        original = _index.relpath_of(self._db.conn, card_id)
         self._staged[card_id] = _Staged(
             card=None, original_relpath=original, relpath=None
         )
@@ -306,7 +282,7 @@ class _Edit:
         if staged is not None:
             current = staged.relpath
         else:
-            current = self._db._relpath(card_id)
+            current = _index.relpath_of(self._db.conn, card_id)
         if new_relpath == current:
             return
         owner = self._relpaths.get(new_relpath)
@@ -316,7 +292,7 @@ class _Edit:
             if staged is None or staged.original_relpath != new_relpath:
                 raise FileExistsError(new_relpath)
         if staged is None:
-            original = self._db._relpath(card_id)
+            original = _index.relpath_of(self._db.conn, card_id)
             new_record = _Staged(
                 card=None, original_relpath=original, relpath=new_relpath
             )
@@ -375,49 +351,11 @@ class _Edit:
         with self._db.conn:
             for card_id, staged in self._staged.items():
                 if staged.card is None and staged.relpath is None:
-                    self._db.conn.execute(
-                        "DELETE FROM entries WHERE id = ?", (card_id,)
-                    )
-                    continue
-                if (
-                    staged.original_relpath is None
-                    and staged.card is not None
-                    and staged.relpath is not None
-                ):
-                    cur = self._db.conn.execute(
-                        "INSERT INTO entries(id, relpath, yaml_text, body) VALUES (?, ?, ?, ?)",
-                        (
-                            staged.card.id,
-                            staged.relpath,
-                            pyyaml.safe_dump(
-                                staged.card.yaml, sort_keys=False, allow_unicode=True
-                            ),
-                            staged.card.body,
-                        ),
-                    )
-                    index.index_fields(self._db.conn, cur.lastrowid, staged.card.yaml)
-                    continue
-                rowid = self._db.conn.execute(
-                    "SELECT rowid FROM entries WHERE id = ?", (card_id,)
-                ).fetchone()[0]
-                if staged.card is None:
-                    self._db.conn.execute(
-                        "UPDATE entries SET relpath = ? WHERE rowid = ?",
-                        (staged.relpath, rowid),
-                    )
+                    _index.delete(self._db.conn, card_id)
+                elif staged.original_relpath is None:
+                    _index.insert(self._db.conn, staged.card, staged.relpath)
+                elif staged.card is None:
+                    _index.update_relpath(self._db.conn, card_id, staged.relpath)
                 else:
-                    self._db.conn.execute(
-                        "UPDATE entries SET relpath = ?, yaml_text = ?, body = ? WHERE rowid = ?",
-                        (
-                            staged.relpath,
-                            pyyaml.safe_dump(
-                                staged.card.yaml, sort_keys=False, allow_unicode=True
-                            ),
-                            staged.card.body,
-                            rowid,
-                        ),
-                    )
-                    self._db.conn.execute(
-                        "DELETE FROM entry_fields WHERE entry_rowid = ?", (rowid,)
-                    )
-                    index.index_fields(self._db.conn, rowid, staged.card.yaml)
+                    _index.update_relpath(self._db.conn, card_id, staged.relpath)
+                    _index.update_content(self._db.conn, staged.card)

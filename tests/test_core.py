@@ -117,7 +117,7 @@ def test_cache_rebuild(db, seed):
         yaml={"x": 1},
     )
     root = db.root
-    from mddb.index import cache_path
+    from mddb._index import cache_path
 
     db.conn.close()
     cache_path(root).unlink()
@@ -158,5 +158,5 @@ def test_card_properties_raise_on_missing_keys():
 
 
 def test_mddb_init_sets_active_edit_none(tmp_path):
-    new_db = mddb.MDDB(tmp_path)
+    new_db = mddb.MDDB.init(tmp_path)
     assert new_db._active_edit is None

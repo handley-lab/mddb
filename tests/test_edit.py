@@ -1,6 +1,7 @@
 import pytest
 
 import mddb
+from mddb import _index
 
 
 def _git_log_count(db) -> int:
@@ -197,7 +198,7 @@ def test_edit_move_existing(db, seed):
     assert _git_log_count(db) == before + 1
     assert not (db.root / "orig.md").exists()
     assert (db.root / "moved.md").exists()
-    assert db._relpath(card.id) == "moved.md"
+    assert _index.relpath_of(db.conn,card.id) == "moved.md"
 
 
 def test_edit_move_to_subdirectory(db, seed):
@@ -256,7 +257,7 @@ def test_edit_move_staged_create(db):
 
 def test_edit_move_same_path_is_noop(db, seed):
     card = seed(title="A", summary="A")
-    current = db._relpath(card.id)
+    current = _index.relpath_of(db.conn,card.id)
     before = _git_log_count(db)
     with db.edit(rationale="self move") as edit:
         edit.move(card.id, current)
@@ -332,7 +333,7 @@ def test_edit_active_slot_cleared_after_sqlite_failure(db, monkeypatch):
     monkeypatch.setattr(db, "_git", real_git)
     assert db._active_edit is None
     assert (db.root / "a.md").exists()
-    from mddb.index import cache_path
+    from mddb._index import cache_path
 
     cache_path(db.root).unlink()
     fresh = mddb.MDDB(db.root)
@@ -349,8 +350,8 @@ def test_edit_move_into_committed_unstaged_card_relpath_raises(db, seed):
     with db.edit(rationale="move into committed") as edit:
         with pytest.raises(FileExistsError):
             edit.move(a.id, "beta.md")
-    assert db._relpath(a.id) == "alpha.md"
-    assert db._relpath(b.id) == "beta.md"
+    assert _index.relpath_of(db.conn,a.id) == "alpha.md"
+    assert _index.relpath_of(db.conn,b.id) == "beta.md"
 
 
 def test_edit_move_away_and_back_collapses(db, seed):

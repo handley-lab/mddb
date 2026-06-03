@@ -29,7 +29,7 @@ def _git_config(key):
 
 @pytest.fixture
 def db(tmp_path):
-    return mddb.MDDB(tmp_path)
+    return mddb.MDDB.init(tmp_path)
 
 
 @pytest.fixture

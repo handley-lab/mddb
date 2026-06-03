@@ -85,14 +85,73 @@ def rebuild_index(root: Path) -> sqlite3.Connection:
         for md_path in sorted(root.rglob("*.md")):
             if ".git" in md_path.relative_to(root).parts:
                 continue
-            card = Card.from_file(md_path)
-            yaml_text = yaml.safe_dump(card.yaml, sort_keys=False, allow_unicode=True)
-            cur = conn.execute(
-                "INSERT INTO entries(id, relpath, yaml_text, body) VALUES (?, ?, ?, ?)",
-                (card.id, str(md_path.relative_to(root)), yaml_text, card.body),
-            )
-            index_fields(conn, cur.lastrowid, card.yaml)
+            insert(conn, Card.from_file(md_path), str(md_path.relative_to(root)))
     return conn
+
+
+def relpath_of(conn: sqlite3.Connection, card_id: str) -> str:
+    """Return the cached relpath for ``card_id``.
+
+    Raises:
+        KeyError: ``card_id`` is not in the cache.
+    """
+    row = conn.execute(
+        "SELECT relpath FROM entries WHERE id = ?", (card_id,)
+    ).fetchone()
+    if row is None:
+        raise KeyError(card_id)
+    return row[0]
+
+
+def insert(conn: sqlite3.Connection, card: Card, relpath: str) -> None:
+    """Cache a new card. Caller must already have written the file + committed."""
+    cur = conn.execute(
+        "INSERT INTO entries(id, relpath, yaml_text, body) VALUES (?, ?, ?, ?)",
+        (card.id, relpath, _yaml_text(card), card.body),
+    )
+    index_fields(conn, cur.lastrowid, card.yaml)
+
+
+def update_content(conn: sqlite3.Connection, card: Card) -> None:
+    """Refresh yaml_text/body and rebuild entry_fields for ``card``."""
+    rowid = conn.execute(
+        "SELECT rowid FROM entries WHERE id = ?", (card.id,)
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE entries SET yaml_text = ?, body = ? WHERE rowid = ?",
+        (_yaml_text(card), card.body, rowid),
+    )
+    conn.execute("DELETE FROM entry_fields WHERE entry_rowid = ?", (rowid,))
+    index_fields(conn, rowid, card.yaml)
+
+
+def update_relpath(conn: sqlite3.Connection, card_id: str, relpath: str) -> None:
+    """Point the cache at a new on-disk path for ``card_id``."""
+    conn.execute(
+        "UPDATE entries SET relpath = ? WHERE id = ?", (relpath, card_id)
+    )
+
+
+def delete(conn: sqlite3.Connection, card_id: str) -> None:
+    """Drop ``card_id`` from the cache. entry_fields cascade via foreign key."""
+    conn.execute("DELETE FROM entries WHERE id = ?", (card_id,))
+
+
+def list_progressive(conn: sqlite3.Connection) -> list[dict]:
+    """Return ``[{id, title, summary}, ...]`` for every cached card."""
+    rows = conn.execute(
+        "SELECT entries.id, t.value_str, s.value_str FROM entries "
+        "LEFT JOIN entry_fields t ON t.entry_rowid = entries.rowid AND t.key = 'title' "
+        "LEFT JOIN entry_fields s ON s.entry_rowid = entries.rowid AND s.key = 'summary'"
+    ).fetchall()
+    return [
+        {"id": cid, "title": title, "summary": summary}
+        for cid, title, summary in rows
+    ]
+
+
+def _yaml_text(card: Card) -> str:
+    return yaml.safe_dump(card.yaml, sort_keys=False, allow_unicode=True)
 
 
 def index_fields(conn: sqlite3.Connection, rowid: int, data: dict) -> None:

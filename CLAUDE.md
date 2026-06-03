@@ -4,7 +4,7 @@ Guidance for Claude Code working in this repository.
 
 `mddb` is a Python library: a minimal YAML-frontmatter + markdown-body card substrate. Cards live as `.md` files in a directory under git; a SQLite index outside the directory (at `~/.cache/mddb/`) provides fast structured + full-text queries; rationales live in commit messages. The substrate has no domain knowledge — no `card_type`, no `status`, no `due`. The only privileged YAML keys are **`id`, `title`, and `summary`** (the three disclosure levels — see "Progressive disclosure" below). Anything heavier (inventories, GTD, anything else) is layer code or, more usually, Alan reasoning in his REPL.
 
-First consumer: `alan` working in a persistent Python REPL. `import mddb; db = mddb.MDDB(path)`. There is no MCP server. There is no CLI. There is no TUI. There is no validation boundary — Alan constructs the calls.
+First consumer: `alan` working in a persistent Python REPL. `import mddb; db = mddb.MDDB(path)` opens an existing deck; `mddb.MDDB.init(path)` bootstraps a fresh one. There is no MCP server. There is no CLI. There is no TUI. There is no validation boundary — Alan constructs the calls.
 
 ## Philosophy
 
@@ -82,7 +82,7 @@ class Card:
     def summary(self) -> str: return self.yaml["summary"]
 ```
 
-`MDDB(path)` opens an existing mddb directory or creates a fresh one (with `git init` + `.gitignore`). One stderr line on creation so a typoed path is visible. `Card` is composition, not a dict subclass: callers write `card.yaml["key"] = value` and `card.body = "..."`. Equality, pickling, and hashing follow ordinary attribute semantics.
+`MDDB(path)` opens the mddb at `path`; mutation operations fire native `subprocess.CalledProcessError` from git if there's no repo there. `MDDB.init(path)` bootstraps a fresh one (`mkdir -p`, `git init`, commits a `.gitignore` containing `*.tmp`). Two explicit entry points — no silent "create if missing." `Card` is composition, not a dict subclass: callers write `card.yaml["key"] = value` and `card.body = "..."`. Equality, pickling, and hashing follow ordinary attribute semantics.
 
 ### Card format
 

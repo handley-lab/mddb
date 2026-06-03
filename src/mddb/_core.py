@@ -6,7 +6,6 @@ import os
 import subprocess
 import sys
 import uuid
-from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,28 +15,6 @@ from slugify import slugify
 
 from . import index
 from .card import Card
-
-
-@dataclass
-class _Staged:
-    card: Card | None
-    original_relpath: str | None
-    relpath: str | None
-
-
-def _copy(card: Card) -> Card:
-    return Card(yaml=deepcopy(card.yaml), body=card.body)
-
-
-def _resolve_relpath(title: str, relpath: str = "") -> str:
-    """Resolve ``relpath`` against ``title`` via the suffix-decides rule.
-
-    If ``relpath`` ends in ``.md`` it is used verbatim; otherwise it is
-    treated as a directory and ``<slugify(title)>.md`` is appended.
-    """
-    if relpath.endswith(".md"):
-        return relpath
-    return os.path.join(relpath, f"{slugify(title)}.md")
 
 
 class MDDB:
@@ -61,9 +38,7 @@ class MDDB:
         self.root = Path(path).expanduser().resolve()
         if not (self.root / ".git").exists():
             self.root.mkdir(parents=True, exist_ok=True)
-            subprocess.run(
-                ["git", "init", "-q", "-b", "master"], cwd=self.root, check=True
-            )
+            self._git("init", "-q", "-b", "master")
             (self.root / ".gitignore").write_text("*.tmp\n")
             self._git("add", "--", ".gitignore")
             self._git("commit", "-m", "initial commit")
@@ -184,6 +159,13 @@ class MDDB:
             raise ValueError(f"invalid relpath: {relpath}")
 
 
+@dataclass
+class _Staged:
+    card: Card | None
+    original_relpath: str | None
+    relpath: str | None
+
+
 class _Edit:
     """Buffer create/read/update/delete/move and materialise them as one commit on clean exit.
 
@@ -237,7 +219,11 @@ class _Edit:
         if "id" not in yaml_d:
             yaml_d["id"] = str(uuid.uuid4())
         new_card = Card(yaml=yaml_d, body=body)
-        resolved = _resolve_relpath(title, relpath)
+        resolved = (
+            relpath
+            if relpath.endswith(".md")
+            else os.path.join(relpath, f"{slugify(title)}.md")
+        )
         self._db._validate_relpath(resolved)
         new_id = new_card.id
         if new_id in self._staged:
@@ -255,7 +241,7 @@ class _Edit:
             card=new_card, original_relpath=None, relpath=resolved
         )
         self._relpaths[resolved] = new_id
-        return _copy(new_card)
+        return new_card.copy()
 
     def read(self, card_id: str) -> Card:
         """Read a card with staged-state visibility."""
@@ -266,8 +252,8 @@ class _Edit:
             if staged.card is None and staged.relpath is None:
                 raise KeyError(card_id)
             if staged.card is not None:
-                return _copy(staged.card)
-            return _copy(self._db.read(card_id))
+                return staged.card.copy()
+            return self._db.read(card_id).copy()
         return self._db.read(card_id)
 
     def update(self, card: Card, *, summary: str) -> Card:
@@ -279,7 +265,7 @@ class _Edit:
         staged = self._staged.get(card_id)
         if staged is not None and staged.card is None and staged.relpath is None:
             raise KeyError(card_id)
-        staged_card = _copy(card)
+        staged_card = card.copy()
         if staged is None:
             original = self._db._relpath(card_id)
             self._staged[card_id] = _Staged(
@@ -292,7 +278,7 @@ class _Edit:
                 original_relpath=staged.original_relpath,
                 relpath=staged.relpath,
             )
-        return _copy(card)
+        return card.copy()
 
     def delete(self, card_id: str) -> None:
         """Stage a delete of ``card_id``."""

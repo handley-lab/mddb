@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -46,6 +47,14 @@ class Card:
     def summary(self) -> str:
         """Return the card's summary (substrate-privileged for progressive disclosure)."""
         return self.yaml["summary"]
+
+    def copy(self) -> Card:
+        """Return a deep copy of this card.
+
+        ``yaml`` is deep-copied (nested lists/dicts are independent);
+        ``body`` is a string and shared.
+        """
+        return Card(yaml=deepcopy(self.yaml), body=self.body)
 
     @classmethod
     def from_file(cls, path: Path) -> Card:

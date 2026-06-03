@@ -9,5 +9,5 @@ for callers who want to compose SQL directly.
 from ._core import MDDB
 from .card import Card
 
-__version__ = "0.0.7"
+__version__ = "0.0.8"
 __all__ = ["MDDB", "Card"]

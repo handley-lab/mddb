@@ -585,3 +585,77 @@ def test_edit_create_omit_empty_disk_text(db):
         card = edit.create(title="A", summary="A", tags=())
     relpath = _index.relpath_of(db.conn, card.id)
     assert "tags:" not in (db.root / relpath).read_text()
+
+
+def _ids_for_tag_query(db, where_clause: str, *params) -> set:
+    rows = db.conn.execute(
+        f"SELECT entries.id FROM entries "
+        f"JOIN entry_fields f ON f.entry_rowid = entries.rowid "
+        f"WHERE f.key = 'tags' AND ({where_clause})",
+        params,
+    ).fetchall()
+    return {r[0] for r in rows}
+
+
+def test_tags_hierarchical_like_prefix(db, seed):
+    a = seed(title="A", summary="A", tags=["area/work"])
+    b = seed(title="B", summary="B", tags=["area/home"])
+    c = seed(title="C", summary="C", tags=["topic/cosmology"])
+    matched = _ids_for_tag_query(db, "f.value_str LIKE ?", "area/%")
+    assert matched == {a.id, b.id}
+    assert c.id not in matched
+
+
+def test_tags_substring_like(db, seed):
+    a = seed(title="A", summary="A", tags=["area/work"])
+    b = seed(title="B", summary="B", tags=["area/home"])
+    seed(title="C", summary="C", tags=["topic/cosmology"])
+    matched = _ids_for_tag_query(db, "f.value_str LIKE ?", "%work%")
+    assert matched == {a.id}
+    assert b.id not in matched
+
+
+def test_tags_self_plus_descendants(db, seed):
+    parent = seed(title="P", summary="P", tags=["area"])
+    work = seed(title="W", summary="W", tags=["area/work"])
+    home = seed(title="H", summary="H", tags=["area/home"])
+    other = seed(title="O", summary="O", tags=["topic/cosmology"])
+    matched = _ids_for_tag_query(
+        db, "f.value_str = ? OR f.value_str LIKE ?", "area", "area/%"
+    )
+    assert matched == {parent.id, work.id, home.id}
+    assert other.id not in matched
+
+
+def test_tags_glob_pattern(db, seed):
+    a = seed(title="A", summary="A", tags=["area/work"])
+    b = seed(title="B", summary="B", tags=["area/home"])
+    seed(title="C", summary="C", tags=["topic/cosmology"])
+    rows = db.conn.execute(
+        "SELECT entries.id FROM entries "
+        "JOIN entry_fields f ON f.entry_rowid = entries.rowid "
+        "WHERE f.key = 'tags' AND f.value_str GLOB 'area/*'"
+    ).fetchall()
+    matched = {r[0] for r in rows}
+    assert matched == {a.id, b.id}
+
+
+def test_tags_query_matches_any_tag_in_multi_tag_card(db, seed):
+    # Middle-position queried tag catches both first-only and last-only indexing bugs.
+    multi = seed(
+        title="A",
+        summary="A",
+        tags=["topic/cosmology", "area/work", "status/open"],
+    )
+    other = seed(title="B", summary="B", tags=["topic/cosmology"])
+    matched = _ids_for_tag_query(db, "f.value_str LIKE ?", "area/%")
+    assert matched == {multi.id}
+    assert other.id not in matched
+
+
+def test_tags_hierarchical_prefix_does_not_match_lookalikes(db, seed):
+    real = seed(title="R", summary="R", tags=["area/work"])
+    seed(title="L1", summary="L1", tags=["area2/work"])
+    seed(title="L2", summary="L2", tags=["area-work"])
+    matched = _ids_for_tag_query(db, "f.value_str LIKE ?", "area/%")
+    assert matched == {real.id}

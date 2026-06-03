@@ -884,3 +884,19 @@ def test_editor_create_same_id_after_staged_delete_raises(db, seed):
             editor.create(
                 title="New", summary="New", yaml={"id": "fixed-id"}, relpath="new.md"
             )
+
+
+def test_index_skips_title_summary_in_entry_fields(db, seed):
+    card = seed(title="A", summary="A sum", tags=["x"])
+    rows = db.conn.execute(
+        "SELECT key FROM entry_fields WHERE entry_rowid = "
+        "(SELECT rowid FROM entries WHERE id = ?) AND key IN ('title', 'summary')",
+        (card.id,),
+    ).fetchall()
+    assert rows == []
+    tag_rows = db.conn.execute(
+        "SELECT key FROM entry_fields WHERE entry_rowid = "
+        "(SELECT rowid FROM entries WHERE id = ?) AND key = 'tags'",
+        (card.id,),
+    ).fetchall()
+    assert tag_rows == [("tags",)]

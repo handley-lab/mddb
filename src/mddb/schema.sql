@@ -4,6 +4,8 @@ CREATE TABLE entries(
     rowid INTEGER PRIMARY KEY AUTOINCREMENT,
     id TEXT UNIQUE NOT NULL,
     relpath TEXT UNIQUE NOT NULL,
+    title TEXT,
+    summary TEXT,
     yaml_text TEXT NOT NULL,
     body TEXT NOT NULL
 );

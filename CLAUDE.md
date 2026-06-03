@@ -115,7 +115,7 @@ id: <uuid-v4>
 
 `tags` is also a substrate filing key but with **different absence semantics**: untagged cards routinely omit the `tags` key, so `Card.tags` raising `KeyError` is *normal* for untagged cards, not drift. Callers who treat tags as optional use `card.yaml.get("tags", [])`.
 
-`MDDB.list()` returns `None` for missing title/summary values via `LEFT JOIN` to keep incomplete cards visible during overviews. YAML is loaded via `yaml.safe_load` (PyYAML defaults). Bare ISO dates parse as `datetime.date`; if you want date strings for lexicographic comparison, quote them in the source YAML.
+`MDDB.list()` returns `None` for missing title/summary values via nullable `entries.title` / `entries.summary` columns (populated from `card.yaml.get("title")` / `.get("summary")` at insert time) to keep incomplete cards visible during overviews. YAML is loaded via `yaml.safe_load` (PyYAML defaults). Bare ISO dates parse as `datetime.date`; if you want date strings for lexicographic comparison, quote them in the source YAML.
 
 On the write path, `_Editor.create` constructs YAML in **canonical key order**: `id`, `title`, `summary`, `tags` (when present), then the caller's remaining `yaml=` keys in their original relative order. The on-disk frontmatter is scannable: the first lines tell you what the card is. `_Editor.update` does NOT re-canonicalise existing YAML order (it preserves what's already on disk).
 
@@ -177,10 +177,12 @@ The next `MDDB(path)` opens the cache if `meta.schema_version` matches; if missi
 
 ```sql
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
-CREATE TABLE entries(rowid INTEGER PRIMARY KEY, id TEXT UNIQUE, relpath TEXT UNIQUE, yaml_text TEXT, body TEXT);
+CREATE TABLE entries(rowid INTEGER PRIMARY KEY, id TEXT UNIQUE, relpath TEXT UNIQUE, title TEXT, summary TEXT, yaml_text TEXT, body TEXT);
 CREATE TABLE entry_fields(entry_rowid INTEGER, key TEXT, value_str TEXT, value_num REAL);
 CREATE VIRTUAL TABLE entries_fts USING fts5(yaml_text, body, content='entries', content_rowid='rowid');
 ```
+
+`title` and `summary` are promoted to dedicated nullable columns on `entries` because they are part of the substrate filing/disclosure vocabulary; `db.list()` reads them directly. `entry_fields` indexes every *other* top-level scalar and list-of-scalars from `card.yaml` (notably `tags`) but skips `title` and `summary` (they have their own columns).
 
 SQLite default journal mode (single-writer). FTS sync via the standard external-content triggers (AI / AD / AU with the `'delete'` row idiom). `entries.body` and `entries.yaml_text` duplicate disk content for FTS; reads always go to disk.
 
@@ -267,11 +269,7 @@ Three disclosure levels — `id` → `title` → `summary` → full card. This i
 
 ```python
 # Level 1: headlines — just id and title
-for cid, title in db.conn.execute(
-    "SELECT entries.id, f.value_str FROM entries "
-    "LEFT JOIN entry_fields f "
-    "  ON f.entry_rowid = entries.rowid AND f.key = 'title'"
-):
+for cid, title in db.conn.execute("SELECT id, title FROM entries"):
     ...
 
 # Level 2: summary view — id, title, summary (this is what db.list() returns)

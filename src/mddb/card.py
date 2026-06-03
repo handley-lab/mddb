@@ -80,8 +80,17 @@ class Card:
 
         The text must begin with ``---\n`` and contain a closing ``\n---\n``
         separator before the body.
+
+        Raises:
+            ValueError: ``text`` does not have a YAML frontmatter delimited by
+                ``---\n`` ... ``\n---\n``.
         """
-        fm_text, body = _FRONTMATTER.match(text).groups()
+        match = _FRONTMATTER.match(text)
+        if match is None:
+            raise ValueError(
+                "malformed frontmatter (expected '---\\n...\\n---\\n' prefix)"
+            )
+        fm_text, body = match.groups()
         return cls(yaml=yaml.safe_load(fm_text), body=body)
 
     def __str__(self) -> str:

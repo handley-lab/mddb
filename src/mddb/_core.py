@@ -138,10 +138,12 @@ class MDDB:
         """Return relpaths of git-tracked stem-paired non-``.md`` sidecars.
 
         Discovery rule matches the substrate's lifecycle phases (move/delete):
-        a sidecar is a git-tracked file in the same directory as the card
-        whose name starts with ``<card_stem>.`` and whose suffix is not
-        ``.md``. Same-stem ``.md`` siblings (e.g. ``notes.extra.md`` next to
-        ``notes.md``) are other cards, not sidecars.
+        a candidate non-``.md`` file in the card's directory belongs to the
+        tracked card whose ``.md`` stem is the *longest* prefix of the
+        candidate's basename (followed by ``.``). So with both ``notes.md``
+        and ``notes.extra.md`` tracked, ``notes.extra.pdf`` belongs to
+        ``notes.extra.md`` (the longer match), not to ``notes.md``.
+        Same-stem ``.md`` siblings are other cards, not sidecars.
 
         Returns:
             Relpaths in sorted order; empty list for cards with no payload.
@@ -207,32 +209,44 @@ def _ext_of(card_relpath: str, sidecar_relpath: str) -> str:
 def _sidecar_siblings(db: MDDB, card_relpath: str) -> list[str]:
     """Return relpaths of git-tracked stem-paired non-``.md`` siblings.
 
-    For a card at X/Y.md, returns relpaths of git-tracked files in X/ (same
-    directory only, not recursive) whose basename starts with ``Y.`` AND
-    whose suffix is not ``.md``. Same-stem ``.md`` siblings (e.g.
-    X/Y.extra.md) are other cards, not sidecars, so they're excluded.
-    Untracked filesystem files are not included; the caller must
+    For a card at X/Y.md, returns relpaths of git-tracked non-``.md`` files
+    in X/ (same directory only, not recursive) that pair to ``Y.md`` and no
+    other tracked card. Pairing rule: each candidate sidecar belongs to the
+    card whose stem is the *longest* prefix of the candidate's basename
+    (followed by ``.``). So with ``notes.md`` and ``notes.extra.md`` both
+    tracked, ``notes.extra.pdf`` belongs to ``notes.extra.md`` (the longer
+    matching stem), not to ``notes.md``.
+
+    Same-stem ``.md`` siblings are other cards, not sidecars, so they're
+    excluded. Untracked filesystem files are not included; the caller must
     ``git add`` a manual sidecar to make it travel.
     """
     card_path = Path(card_relpath)
     card_parent = card_path.parent
     stem = card_path.stem
-    prefix = f"{stem}."
     ls_args = ["ls-files", "-z", "--"]
     if str(card_parent) != ".":
         ls_args.append(f"{card_parent}/")
     out = db._git(*ls_args).stdout
     tracked = [p for p in out.split("\x00") if p]
-    siblings = []
+    card_stems: list[str] = []
+    candidates: list[Path] = []
     for path in tracked:
         path_obj = Path(path)
         if path_obj.parent != card_parent:
             continue
         if path_obj.suffix == ".md":
-            continue
-        if not path_obj.name.startswith(prefix):
-            continue
-        siblings.append(path)
+            card_stems.append(path_obj.stem)
+        else:
+            candidates.append(path_obj)
+    siblings: list[str] = []
+    for cand in candidates:
+        owner = ""
+        for s in card_stems:
+            if cand.name.startswith(f"{s}.") and len(s) > len(owner):
+                owner = s
+        if owner == stem:
+            siblings.append(str(cand))
     return sorted(siblings)
 
 
@@ -343,8 +357,12 @@ class _Editor:
                     planned_targets.add(create_sidecar_relpath)
         for staged in self._staged.values():
             if isinstance(staged, _Delete):
+                sidecars = _sidecar_siblings(self._db, staged.original_relpath)
                 self._db._git("rm", "--", staged.original_relpath)
                 touched.add(staged.original_relpath)
+                for sidecar in sidecars:
+                    self._db._git("rm", "--", sidecar)
+                    touched.add(sidecar)
         for old_path, new_path in move_plan:
             (self._db.root / new_path).parent.mkdir(parents=True, exist_ok=True)
             self._db._git("mv", "--", old_path, new_path)

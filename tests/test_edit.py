@@ -1318,3 +1318,118 @@ def test_editor_move_collision_preflight_runs_before_staged_delete(db):
     assert not (db.root / "dest").exists()
     status = db._git("status", "--porcelain", "--untracked-files=no").stdout
     assert status == "", f"tracked tree not clean: {status!r}"
+
+
+def test_editor_delete_takes_sidecar_along(db):
+    with db.editor(rationale="seed blob") as editor:
+        card = editor.create(
+            title="A",
+            summary="A",
+            relpath="papers/a.md",
+            payload=b"pdf",
+            payload_ext=".pdf",
+        )
+    with db.editor(rationale="discard blob") as editor:
+        editor.delete(card.id)
+    assert not (db.root / "papers/a.md").exists()
+    assert not (db.root / "papers/a.pdf").exists()
+    tracked = db._git("ls-files", "--", "papers/").stdout
+    assert tracked == ""
+
+
+def test_editor_delete_takes_multiple_tracked_sidecars(db):
+    with db.editor(rationale="seed blob") as editor:
+        card = editor.create(
+            title="A",
+            summary="A",
+            relpath="papers/a.md",
+            payload=b"pdf",
+            payload_ext=".pdf",
+        )
+    (db.root / "papers/a.extra.txt").write_text("extra")
+    db._git("add", "--", "papers/a.extra.txt")
+    db._git("commit", "-q", "-m", "extra sidecar")
+    with db.editor(rationale="discard blob and extras") as editor:
+        editor.delete(card.id)
+    assert not (db.root / "papers/a.md").exists()
+    assert not (db.root / "papers/a.pdf").exists()
+    assert not (db.root / "papers/a.extra.txt").exists()
+    tracked = db._git("ls-files", "--", "papers/").stdout
+    assert tracked == ""
+
+
+def test_editor_create_then_delete_with_payload_writes_nothing(db):
+    with db.editor(rationale="create + delete") as editor:
+        card = editor.create(
+            title="A",
+            summary="A",
+            relpath="papers/a.md",
+            payload=b"pdf",
+            payload_ext=".pdf",
+        )
+        editor.delete(card.id)
+    assert not (db.root / "papers/a.md").exists()
+    assert not (db.root / "papers/a.pdf").exists()
+
+
+def test_editor_delete_then_create_blob_at_same_relpath(db):
+    with db.editor(rationale="seed v1") as editor:
+        old = editor.create(
+            title="Receipt v1",
+            summary="v1",
+            relpath="receipts/x.md",
+            payload=b"v1-pdf",
+            payload_ext=".pdf",
+        )
+    with db.editor(rationale="replace v1 with v2") as editor:
+        editor.delete(old.id)
+        new = editor.create(
+            title="Receipt v2",
+            summary="v2",
+            relpath="receipts/x.md",
+            payload=b"v2-pdf",
+            payload_ext=".pdf",
+        )
+    assert (db.root / "receipts/x.md").exists()
+    assert (db.root / "receipts/x.pdf").read_bytes() == b"v2-pdf"
+    with pytest.raises(KeyError):
+        db.read(old.id)
+    assert db.read(new.id).id == new.id
+
+
+def test_editor_delete_preserves_longer_stem_sibling_card_sidecar(db):
+    with db.editor(rationale="seed notes") as editor:
+        notes = editor.create(title="notes", summary="notes", relpath="space/notes.md")
+    with db.editor(rationale="seed notes.extra blob") as editor:
+        editor.create(
+            title="notes-extra",
+            summary="notes-extra",
+            relpath="space/notes.extra.md",
+            payload=b"extra-pdf",
+            payload_ext=".pdf",
+        )
+    assert db.sidecar_relpaths(notes.id) == []
+    with db.editor(rationale="discard notes.md") as editor:
+        editor.delete(notes.id)
+    assert not (db.root / "space/notes.md").exists()
+    assert (db.root / "space/notes.extra.md").exists()
+    assert (db.root / "space/notes.extra.pdf").read_bytes() == b"extra-pdf"
+
+
+def test_editor_move_preserves_longer_stem_sibling_card_sidecar(db):
+    with db.editor(rationale="seed notes") as editor:
+        notes = editor.create(title="notes", summary="notes", relpath="space/notes.md")
+    with db.editor(rationale="seed notes.extra blob") as editor:
+        editor.create(
+            title="notes-extra",
+            summary="notes-extra",
+            relpath="space/notes.extra.md",
+            payload=b"extra-pdf",
+            payload_ext=".pdf",
+        )
+    with db.editor(rationale="archive notes.md only") as editor:
+        editor.move(notes.id, "archive/notes.md")
+    assert (db.root / "archive/notes.md").exists()
+    assert not (db.root / "archive/notes.extra.pdf").exists()
+    assert (db.root / "space/notes.extra.md").exists()
+    assert (db.root / "space/notes.extra.pdf").read_bytes() == b"extra-pdf"

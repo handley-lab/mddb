@@ -1433,3 +1433,25 @@ def test_editor_move_preserves_longer_stem_sibling_card_sidecar(db):
     assert not (db.root / "archive/notes.extra.pdf").exists()
     assert (db.root / "space/notes.extra.md").exists()
     assert (db.root / "space/notes.extra.pdf").read_bytes() == b"extra-pdf"
+
+
+def test_editor_create_then_move_with_payload_collides_with_existing_sidecar(db):
+    (db.root / "final").mkdir()
+    (db.root / "final/a.pdf").write_bytes(b"blocker")
+    db._git("add", "--", "final/a.pdf")
+    db._git("commit", "-q", "-m", "blocker pdf at final destination")
+    with pytest.raises(FileExistsError):
+        with db.editor(rationale="create + move into existing sidecar") as editor:
+            card = editor.create(
+                title="A",
+                summary="A",
+                relpath="staging/a.md",
+                payload=b"new-pdf",
+                payload_ext=".pdf",
+            )
+            editor.move(card.id, "final/a.md")
+    assert (db.root / "final/a.pdf").read_bytes() == b"blocker"
+    assert not (db.root / "final/a.md").exists()
+    assert not (db.root / "staging").exists()
+    status = db._git("status", "--porcelain", "--untracked-files=no").stdout
+    assert status == "", f"tracked tree not clean: {status!r}"

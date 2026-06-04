@@ -343,6 +343,13 @@ class _Editor:
                         raise FileExistsError(new_sidecar)
                     planned_targets.add(new_sidecar)
                     move_plan.append((old_sidecar, new_sidecar))
+        deleted_paths: set[str] = set()
+        for staged in self._staged.values():
+            if isinstance(staged, _Delete):
+                deleted_paths.add(staged.original_relpath)
+                deleted_paths.update(
+                    _sidecar_siblings(self._db, staged.original_relpath)
+                )
         for staged in self._staged.values():
             if isinstance(staged, _Create):
                 if staged.relpath in planned_targets:
@@ -353,6 +360,10 @@ class _Editor:
                         staged.relpath, staged.sidecar[1]
                     )
                     if create_sidecar_relpath in planned_targets:
+                        raise FileExistsError(create_sidecar_relpath)
+                    if (
+                        self._db.root / create_sidecar_relpath
+                    ).exists() and create_sidecar_relpath not in deleted_paths:
                         raise FileExistsError(create_sidecar_relpath)
                     planned_targets.add(create_sidecar_relpath)
         for staged in self._staged.values():

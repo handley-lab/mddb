@@ -71,12 +71,15 @@ class MDDB:
     def list(self) -> list[dict]: ...  # [{id, title, summary}, ...] — progressive disclosure
     def history(self, card_id: str) -> list[dict]: ...
     def editor(self, *, rationale: str) -> _Editor: ...
+    def sidecar_relpaths(self, card_id: str) -> list[str]: ...  # blob-card sidecars
     conn: sqlite3.Connection  # exposed; write SQL against the schema below
 
 class _Editor:  # private; only reachable via the with-block from MDDB.editor
     def create(self, *, title: str, summary: str, yaml: dict | None = None,
                body: str = "", relpath: str = "",
-               tags: Sequence[str] | None = None) -> Card: ...
+               tags: Sequence[str] | None = None,
+               payload: Path | bytes | None = None,
+               payload_ext: str = "") -> Card: ...
     def read(self, card_id: str) -> Card: ...
     def update(self, card: Card, *, summary: str,
                tags: Sequence[str] | None = None) -> Card: ...
@@ -160,6 +163,39 @@ db.conn.execute(
 ```
 
 Self plus descendants: `f.value_str = 'area' OR f.value_str LIKE 'area/%'`. Substring: `f.value_str LIKE '%work%'`. Shell-style: `f.value_str GLOB 'area/*'`. Regex via SQLite's `REGEXP` operator is available if the caller registers a function on `db.conn` themselves (one line: `conn.create_function("regexp", 2, lambda p, v: bool(re.search(p, v)))`) — substrate doesn't preinstall, matching the compose-don't-wrap stance.
+
+### Blob cards
+
+A binary that's worth remembering becomes a card in its own right: a `.md` card carrying title/summary/tags/body (OCR text, transcript, notes) paired with a binary *sidecar* sharing the same filename stem. The substrate enforces lifecycle coupling — `editor.move` and `editor.delete` carry every git-tracked stem-paired non-`.md` sibling along with the card — but doesn't index sidecars, doesn't track them in YAML, doesn't do content addressing, doesn't dedup, doesn't carry MIME types, doesn't grow a "type" vocabulary.
+
+```python
+with db.editor(rationale="seed 2025 return") as editor:
+    card = editor.create(
+        title="2025 Tax Return",
+        summary="Federal + state filings",
+        relpath="receipts/2025-return.md",
+        payload=Path("/tmp/return.pdf"),  # or raw bytes
+        payload_ext=".pdf",               # required for bytes; derived from Path with a single suffix
+    )
+# disk now has receipts/2025-return.md + receipts/2025-return.pdf, one commit.
+db.sidecar_relpaths(card.id)  # ["receipts/2025-return.pdf"]
+```
+
+Pairing rule (used identically by lifecycle phases and by `MDDB.sidecar_relpaths`): a non-`.md` candidate sibling belongs to the card whose `.md` stem is the *longest* prefix of the candidate's basename (followed by `.`). With both `notes.md` and `notes.extra.md` tracked, `notes.extra.pdf` belongs to `notes.extra.md` (longer match), not to `notes.md`. The substrate writes exactly one sidecar via `editor.create(payload=...)`; additional sidecars can be `git add`-ed by the user and the substrate carries them.
+
+Reading sidecar bytes: `(db.root / db.sidecar_relpaths(card.id)[0]).read_bytes()`. The substrate exposes the discovery primitive, not the byte read — keep the I/O at the call site.
+
+### Blob cards and LFS
+
+Sidecars are git-tracked through normal `git add` / `git mv` / `git rm`. Git LFS's clean/smudge filters work transparently if `.gitattributes` is configured in the deck root:
+
+```
+*.pdf filter=lfs diff=lfs merge=lfs -text
+*.png filter=lfs diff=lfs merge=lfs -text
+*.m4a filter=lfs diff=lfs merge=lfs -text
+```
+
+`MDDB.init` does NOT write `.gitattributes` — LFS setup is operator policy, not substrate behaviour.
 
 ### Mutation flow
 
@@ -340,3 +376,6 @@ Other ruff defaults are left alone.
 - `editor` commits only the paths it touched (via `git commit -- <paths>`); pre-staged unrelated changes in the caller's working tree are left staged, not swept into the editor's commit.
 - SQLite is disposable; `.md` files and git are truth.
 - Concurrent writers from another process are outside the prototype contract.
+- A card's filename stem is paired with any git-tracked same-directory non-`.md` file whose name starts with `{stem}.` AND whose own `.md` stem (under the longest-prefix rule) is this card's stem. Lifecycle (`editor.move`, `editor.delete`) and discovery (`MDDB.sidecar_relpaths`) carry/return all such siblings. Substrate-written sidecars from `editor.create(payload=...)` are tracked automatically; manually-placed siblings must be `git add`-ed first — untracked files are NOT discovered.
+- `editor.create(payload=..., payload_ext=...)` rejects multi-part extensions on write (e.g. `.tar.gz`) — single-suffix only. For archive payloads use `.tgz`/`.tbz`. The discovery rule used on move/delete still accepts whatever's on disk, so externally-placed multi-suffix sidecars travel with the card.
+- Symlink sidecars are discovered exactly as `git ls-files` reports them: if a tracked symlink at `X/Y.lnk` sits alongside `X/Y.md`, lifecycle moves/deletes the symlink entry (not the resolved target). Untracked symlinks are ignored like any other untracked file.

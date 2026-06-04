@@ -1096,3 +1096,225 @@ def test_mddb_sidecar_relpaths(db, tmp_path):
 
     with pytest.raises(KeyError):
         db.sidecar_relpaths("nope")
+
+
+def test_editor_move_takes_sidecar_along(db):
+    with db.editor(rationale="create blob") as editor:
+        card = editor.create(
+            title="A",
+            summary="A",
+            relpath="papers/a.md",
+            payload=b"x",
+            payload_ext=".pdf",
+        )
+    with db.editor(rationale="move blob") as editor:
+        editor.move(card.id, "archive/a.md")
+    assert not (db.root / "papers/a.md").exists()
+    assert not (db.root / "papers/a.pdf").exists()
+    assert (db.root / "archive/a.md").exists()
+    assert (db.root / "archive/a.pdf").read_bytes() == b"x"
+
+
+def test_editor_move_does_not_drag_same_stem_md_sibling(db):
+    with db.editor(rationale="two cards") as editor:
+        notes = editor.create(title="Notes", summary="Notes", relpath="notes.md")
+        editor.create(title="Extra", summary="Extra", relpath="notes.extra.md")
+    with db.editor(rationale="move notes only") as editor:
+        editor.move(notes.id, "archive/notes.md")
+    assert not (db.root / "notes.md").exists()
+    assert (db.root / "notes.extra.md").exists()
+    assert (db.root / "archive/notes.md").exists()
+    assert not (db.root / "archive/notes.extra.md").exists()
+
+
+def test_editor_move_takes_multiple_tracked_sidecars(db):
+    with db.editor(rationale="create blob") as editor:
+        card = editor.create(
+            title="A",
+            summary="A",
+            relpath="papers/a.md",
+            payload=b"pdf",
+            payload_ext=".pdf",
+        )
+    (db.root / "papers/a.png").write_bytes(b"png")
+    db._git("add", "--", "papers/a.png")
+    db._git("commit", "-q", "-m", "add tracked second sidecar")
+    with db.editor(rationale="move blob") as editor:
+        editor.move(card.id, "archive/a.md")
+    assert (db.root / "archive/a.md").exists()
+    assert (db.root / "archive/a.pdf").read_bytes() == b"pdf"
+    assert (db.root / "archive/a.png").read_bytes() == b"png"
+    assert not (db.root / "papers/a.png").exists()
+
+
+def test_editor_move_skips_untracked_sidecar(db):
+    with db.editor(rationale="create blob") as editor:
+        card = editor.create(
+            title="A",
+            summary="A",
+            relpath="papers/a.md",
+            payload=b"pdf",
+            payload_ext=".pdf",
+        )
+    (db.root / "papers/a.png").write_bytes(b"untracked")
+    with db.editor(rationale="move blob") as editor:
+        editor.move(card.id, "archive/a.md")
+    assert (db.root / "archive/a.md").exists()
+    assert (db.root / "archive/a.pdf").read_bytes() == b"pdf"
+    assert (db.root / "papers/a.png").read_bytes() == b"untracked"
+    assert not (db.root / "archive/a.png").exists()
+
+
+def test_editor_move_sidecar_collision_at_new_location_raises(db):
+    with db.editor(rationale="create blob") as editor:
+        card_a = editor.create(
+            title="A",
+            summary="A",
+            relpath="papers/a.md",
+            payload=b"x",
+            payload_ext=".pdf",
+        )
+    (db.root / "papers/conflict").mkdir()
+    (db.root / "papers/conflict/a.pdf").write_text("blocker")
+    db._git("add", "--", "papers/conflict/a.pdf")
+    db._git("commit", "-q", "-m", "blocker pdf at target")
+    with pytest.raises(FileExistsError):
+        with db.editor(rationale="move into collision") as editor:
+            editor.move(card_a.id, "papers/conflict/a.md")
+    assert (db.root / "papers/a.md").exists()
+    assert (db.root / "papers/a.pdf").exists()
+
+
+def test_editor_create_then_move_with_payload_writes_at_new_location(db):
+    with db.editor(rationale="create then move") as editor:
+        card = editor.create(
+            title="A",
+            summary="A",
+            relpath="staging/a.md",
+            payload=b"bytes",
+            payload_ext=".pdf",
+        )
+        editor.move(card.id, "final/a.md")
+    assert not (db.root / "staging/a.md").exists()
+    assert not (db.root / "staging/a.pdf").exists()
+    assert (db.root / "final/a.md").exists()
+    assert (db.root / "final/a.pdf").read_bytes() == b"bytes"
+
+
+def test_editor_move_preserves_dotted_card_stem(db):
+    with db.editor(rationale="dotted-stem blob") as editor:
+        card = editor.create(
+            title="Return",
+            summary="Return",
+            relpath="papers/2025.return.md",
+            payload=b"pdf",
+            payload_ext=".pdf",
+        )
+    with db.editor(rationale="move dotted-stem") as editor:
+        editor.move(card.id, "archive/2025.return.md")
+    assert (db.root / "archive/2025.return.md").exists()
+    assert (db.root / "archive/2025.return.pdf").read_bytes() == b"pdf"
+    assert not (db.root / "papers/2025.return.md").exists()
+    assert not (db.root / "papers/2025.return.pdf").exists()
+
+
+def test_editor_move_duplicate_planned_sidecar_destinations_raises(db):
+    with db.editor(rationale="seed A") as editor:
+        card_a = editor.create(
+            title="A",
+            summary="A",
+            relpath="src/a.md",
+            payload=b"a",
+            payload_ext=".pdf",
+        )
+    (db.root / "src/a.extra.txt").write_text("extra")
+    db._git("add", "--", "src/a.extra.txt")
+    db._git("commit", "-q", "-m", "manual a.extra.txt sidecar")
+    with db.editor(rationale="seed B") as editor:
+        card_b = editor.create(
+            title="B",
+            summary="B",
+            relpath="src/b.md",
+            payload=b"b",
+            payload_ext=".txt",
+        )
+    with pytest.raises(FileExistsError):
+        with db.editor(rationale="colliding moves") as editor:
+            editor.move(card_a.id, "dest/foo.md")
+            editor.move(card_b.id, "dest/foo.extra.md")
+    assert (db.root / "src/a.md").exists()
+    assert (db.root / "src/a.pdf").exists()
+    assert (db.root / "src/a.extra.txt").exists()
+    assert (db.root / "src/b.md").exists()
+    assert (db.root / "src/b.txt").exists()
+    assert not (db.root / "dest").exists()
+    status = db._git("status", "--porcelain", "--untracked-files=no").stdout
+    assert status == "", f"tracked tree not clean: {status!r}"
+
+
+def test_editor_moved_sidecar_collides_with_staged_create_sidecar_raises(db):
+    with db.editor(rationale="seed A") as editor:
+        card_a = editor.create(
+            title="A",
+            summary="A",
+            relpath="src/a.md",
+            payload=b"original",
+            payload_ext=".pdf",
+        )
+    (db.root / "src/a.extra.txt").write_text("original-extra")
+    db._git("add", "--", "src/a.extra.txt")
+    db._git("commit", "-q", "-m", "manual a.extra.txt sidecar")
+    with pytest.raises(FileExistsError):
+        with db.editor(rationale="move + create collide on sidecar") as editor:
+            editor.move(card_a.id, "dest/foo.md")
+            editor.create(
+                title="B",
+                summary="B",
+                relpath="dest/foo.extra.md",
+                payload=b"new-bytes",
+                payload_ext=".txt",
+            )
+    assert (db.root / "src/a.md").exists()
+    assert (db.root / "src/a.pdf").exists()
+    assert (db.root / "src/a.extra.txt").read_text() == "original-extra"
+    assert not (db.root / "dest").exists()
+    status = db._git("status", "--porcelain", "--untracked-files=no").stdout
+    assert status == "", f"tracked tree not clean: {status!r}"
+
+
+def test_editor_move_collision_preflight_runs_before_staged_delete(db):
+    with db.editor(rationale="seed A") as editor:
+        card_a = editor.create(
+            title="A",
+            summary="A",
+            relpath="src/a.md",
+            payload=b"a",
+            payload_ext=".pdf",
+        )
+    (db.root / "src/a.extra.txt").write_text("extra")
+    db._git("add", "--", "src/a.extra.txt")
+    db._git("commit", "-q", "-m", "manual a.extra.txt sidecar")
+    with db.editor(rationale="seed B and bystander") as editor:
+        card_b = editor.create(
+            title="B",
+            summary="B",
+            relpath="src/b.md",
+            payload=b"b",
+            payload_ext=".txt",
+        )
+        bystander = editor.create(
+            title="Bystander",
+            summary="Bystander",
+            relpath="src/bystander.md",
+        )
+    with pytest.raises(FileExistsError):
+        with db.editor(rationale="delete + colliding moves") as editor:
+            editor.delete(bystander.id)
+            editor.move(card_a.id, "dest/foo.md")
+            editor.move(card_b.id, "dest/foo.extra.md")
+    assert (db.root / "src/bystander.md").exists()
+    assert (db.root / "src/a.md").exists()
+    assert (db.root / "src/b.md").exists()
+    assert not (db.root / "dest").exists()
+    status = db._git("status", "--porcelain", "--untracked-files=no").stdout
+    assert status == "", f"tracked tree not clean: {status!r}"

@@ -310,20 +310,46 @@ class _Editor:
             if not isinstance(staged, (_Create, _Update, _Move, _Delete)):
                 raise TypeError(f"unknown staged variant: {type(staged).__name__}")
         touched: set[str] = set()
-        for staged in self._staged.values():
-            if isinstance(staged, _Delete):
-                self._db._git("rm", "--", staged.original_relpath)
-                touched.add(staged.original_relpath)
+        move_plan: list[tuple[str, str]] = []
+        planned_targets: set[str] = set()
         for staged in self._staged.values():
             if isinstance(staged, (_Move, _Update)) and (
                 staged.relpath != staged.original_relpath
             ):
-                (self._db.root / staged.relpath).parent.mkdir(
-                    parents=True, exist_ok=True
-                )
-                self._db._git("mv", "--", staged.original_relpath, staged.relpath)
+                if staged.relpath in planned_targets:
+                    raise FileExistsError(staged.relpath)
+                planned_targets.add(staged.relpath)
+                move_plan.append((staged.original_relpath, staged.relpath))
+                for old_sidecar in _sidecar_siblings(self._db, staged.original_relpath):
+                    ext = _ext_of(staged.original_relpath, old_sidecar)
+                    new_sidecar = _sidecar_at(staged.relpath, ext)
+                    if (self._db.root / new_sidecar).exists():
+                        raise FileExistsError(new_sidecar)
+                    if new_sidecar in planned_targets:
+                        raise FileExistsError(new_sidecar)
+                    planned_targets.add(new_sidecar)
+                    move_plan.append((old_sidecar, new_sidecar))
+        for staged in self._staged.values():
+            if isinstance(staged, _Create):
+                if staged.relpath in planned_targets:
+                    raise FileExistsError(staged.relpath)
+                planned_targets.add(staged.relpath)
+                if staged.sidecar is not None:
+                    create_sidecar_relpath = _sidecar_at(
+                        staged.relpath, staged.sidecar[1]
+                    )
+                    if create_sidecar_relpath in planned_targets:
+                        raise FileExistsError(create_sidecar_relpath)
+                    planned_targets.add(create_sidecar_relpath)
+        for staged in self._staged.values():
+            if isinstance(staged, _Delete):
+                self._db._git("rm", "--", staged.original_relpath)
                 touched.add(staged.original_relpath)
-                touched.add(staged.relpath)
+        for old_path, new_path in move_plan:
+            (self._db.root / new_path).parent.mkdir(parents=True, exist_ok=True)
+            self._db._git("mv", "--", old_path, new_path)
+            touched.add(old_path)
+            touched.add(new_path)
         for staged in self._staged.values():
             if isinstance(staged, (_Create, _Update)):
                 target = self._db.root / staged.relpath

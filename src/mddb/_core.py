@@ -166,17 +166,6 @@ def _validate_in_root(root: Path, relpath: str) -> None:
         raise ValueError(f"relpath must be relative and canonical: {relpath}")
 
 
-def _blob_at(card_relpath: str, ext: str) -> str:
-    """Return the blob relpath for a card relpath + leading-dot extension.
-
-    ``with_suffix`` replaces only the final ``.md`` suffix, so dotted card
-    stems (``papers/2025.return.md`` -> ``papers/2025.return.pdf``) resolve
-    correctly. ``with_suffix`` raises ``ValueError`` natively if ``ext``
-    contains a path separator.
-    """
-    return str(Path(card_relpath).with_suffix(ext))
-
-
 @dataclass
 class _Create:
     card: Card
@@ -291,13 +280,13 @@ class _Editor:
             )
             target: str | None = None
             if isinstance(staged, _Create) and staged.blob is not None:
-                target = _blob_at(relpath, staged.blob[1])
+                target = str(Path(relpath).with_suffix(staged.blob[1]))
             elif moved:
                 old = _index.blob_on_disk(
                     root / staged.original_relpath, ignore=deleted_abs
                 )
                 if old is not None:
-                    target = _blob_at(relpath, old.suffix)
+                    target = str(Path(relpath).with_suffix(old.suffix))
                     blob_moves.append((str(old.relative_to(root)), target))
             if isinstance(staged, (_Create, _Move)) or moved:
                 claim(relpath)
@@ -356,7 +345,7 @@ class _Editor:
                 touched.add(staged.relpath)
                 if isinstance(staged, _Create) and staged.blob is not None:
                     blob_bytes, ext = staged.blob
-                    blob_relpath = _blob_at(staged.relpath, ext)
+                    blob_relpath = str(Path(staged.relpath).with_suffix(ext))
                     blob_target = root / blob_relpath
                     blob_tmp = blob_target.with_suffix(
                         blob_target.suffix + f".{uuid.uuid4().hex}.tmp"
@@ -483,7 +472,7 @@ class _Editor:
                 raise ValueError(f"blob_ext must be a single suffix: {ext}")
             if ext == ".md":
                 raise ValueError("blob_ext cannot be .md")
-            _validate_in_root(self._db.root, _blob_at(resolved, ext))
+            _validate_in_root(self._db.root, str(Path(resolved).with_suffix(ext)))
             blob_bytes = blob.read_bytes() if isinstance(blob, Path) else bytes(blob)
             staged_blob = (blob_bytes, ext)
         self._staged[new_card.id] = _Create(

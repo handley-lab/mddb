@@ -67,8 +67,8 @@ The mddb directory stays clean of mddb-specific cruft. The cache is fully derive
 ```python
 class MDDB:
     def __init__(self, path: Path | str): ...
-    def read(self, card_id: str) -> Card: ...
-    def list(self) -> list[dict]: ...  # [{id, title, summary}, ...] — progressive disclosure
+    def read(self, card_id: str) -> Card: ...  # stamps Card.blob from disk
+    def list(self) -> list[dict]: ...  # [{id, title, summary, blob_relpath}, ...] — progressive disclosure
     def history(self, card_id: str) -> list[dict]: ...
     def editor(self, *, rationale: str) -> _Editor: ...
     conn: sqlite3.Connection  # exposed; write SQL against the schema below
@@ -76,7 +76,8 @@ class MDDB:
 class _Editor:  # private; only reachable via the with-block from MDDB.editor
     def create(self, *, title: str, summary: str, yaml: dict | None = None,
                body: str = "", relpath: str = "",
-               tags: Sequence[str] | None = None) -> Card: ...
+               tags: Sequence[str] | None = None,
+               blob: Path | bytes | None = None, blob_ext: str = "") -> Card: ...
     def read(self, card_id: str) -> Card: ...
     def update(self, card: Card, *, summary: str,
                tags: Sequence[str] | None = None) -> Card: ...
@@ -88,6 +89,7 @@ class _Editor:  # private; only reachable via the with-block from MDDB.editor
 class Card:
     yaml: dict
     body: str
+    blob: Path | None  # absolute path to the binary blob; stamped by MDDB.read
     @property
     def id(self) -> str: return self.yaml["id"]
     @property
@@ -161,28 +163,64 @@ db.conn.execute(
 
 Self plus descendants: `f.value_str = 'area' OR f.value_str LIKE 'area/%'`. Substring: `f.value_str LIKE '%work%'`. Shell-style: `f.value_str GLOB 'area/*'`. Regex via SQLite's `REGEXP` operator is available if the caller registers a function on `db.conn` themselves (one line: `conn.create_function("regexp", 2, lambda p, v: bool(re.search(p, v)))`) — substrate doesn't preinstall, matching the compose-don't-wrap stance.
 
+### Blob cards
+
+A binary worth remembering becomes a **blob card**: an ordinary `.md` card paired with one binary file sharing its filename stem (`floorplan.md` + `floorplan.png`). The card is the remembered thing and its searchable face (title/summary/tags/body — OCR, transcript, notes); the blob is its bytes. **Strict 1:1** — a card has at most one blob; a group of related binaries (a meeting with twelve receipt scans) is twelve receipt cards plus one meeting card linking them, not one card owning twelve files. Every binary in the substrate gets its own filing vocabulary and is independently FTS-findable, rather than becoming an untitled attachment.
+
+```python
+with db.editor(rationale="seed return") as e:
+    card = e.create(title="2025 Return", summary="filings",
+                    relpath="receipts/2025-return.md",
+                    blob=Path("/tmp/return.pdf"))   # or blob=raw_bytes, blob_ext=".pdf"
+# disk: receipts/2025-return.md + receipts/2025-return.pdf, one commit.
+db.read(card.id).blob          # Path(".../receipts/2025-return.pdf")
+db.read(card.id).blob.read_bytes()
+[e["blob_relpath"] for e in db.list()]   # bulk presence, str | None per card
+```
+
+`create(blob=Path|bytes, blob_ext=str)`: a `Path` is read eagerly, `bytes` used directly. `blob_ext` (single suffix, e.g. `".pdf"`) is required for `bytes` and overrides a `Path`'s suffix; for a single-suffix `Path` it is derived. The blob file is written at materialise time; the returned card's `.blob` is `None` (the file doesn't exist until commit) — read it back with `db.read`.
+
+**Ownership is exact-stem, filesystem-discovered.** A card at `D/S.md` owns the single non-`.md`, nonempty-suffix file in `D` whose `Path.stem == S`. So `notes.extra.pdf` (stem `notes.extra`) belongs to `notes.extra.md`, never to `notes.md`. Two such siblings is drift the cache can't represent → `ValueError` (at read, rebuild, and the lifecycle plan phase). Because cards are discovered by walking the filesystem, blobs are too — and creating a `.md` beside a pre-existing same-stem binary **adopts** it (describe-an-existing-file is first-class).
+
+**Lifecycle.** `editor.move` and `editor.delete` carry/remove the card's blob. `_materialise` plans the whole batch — computing each surviving card's final blob, checking every card+blob destination and blob trackedness — **before any git/filesystem mutation**, so a collision or untracked blob raises with the working tree clean. `card.blob` is discovered live from disk by `db.read`; `blob_relpath` is the bulk cache, refreshed on every create/move/update. Like the rest of the SQLite cache it is disposable: a binary dropped beside a card out-of-band shows up in `db.read` immediately but in `db.list()`'s `blob_relpath` only after the next mutation of that card or a rebuild.
+
+### Blob cards and LFS
+
+Blobs are git-tracked through normal `git add`/`git mv`/`git rm`. Git LFS's clean/smudge filters work transparently when `.gitattributes` in the deck root routes the extensions:
+
+```
+*.pdf filter=lfs diff=lfs merge=lfs -text
+*.png filter=lfs diff=lfs merge=lfs -text
+*.m4a filter=lfs diff=lfs merge=lfs -text
+```
+
+`MDDB.init` does NOT write `.gitattributes` — LFS is operator policy, not substrate behaviour. With LFS, `card.blob.read_bytes()` returns the real bytes when the pointer is smudged, the pointer text otherwise; the substrate doesn't intervene.
+
 ### Mutation flow
 
 All mutation flows through `db.editor()`. The commit phase, on clean `__exit__`:
 
-1. `git rm` staged deletes.
-2. `git mv` staged moves (parent dirs created as needed).
-3. Write staged creates/updates via temp file + `os.replace`, then `git add`.
+0. **Plan** (no mutation): snapshot staged deletes, compute each surviving card's final blob, and check every card+blob destination collision and blob trackedness. Any raise here leaves the working tree clean.
+1. `git rm` staged deletes (card + its blob).
+2. `git mv` staged moves — cards, then their carried blobs (parent dirs created as needed).
+3. Write staged creates/updates via temp file + `os.replace`, then `git add` (card, then a staged-create's blob bytes).
 4. One `git commit -m <rationale> -- <touched paths>` (path-restricted so unrelated pre-staged changes in the caller's working tree stay staged).
-5. SQLite insert/update/delete inside `with self.conn:`. If this raises, `sqlite3.Error` propagates and the cache may be left stale.
+5. SQLite insert/update/delete inside `with self.conn:`, caching each card's planned `blob_relpath`. If this raises, `sqlite3.Error` propagates and the cache may be left stale.
 
 The next `MDDB(path)` opens the cache if `meta.schema_version` matches; if missing or different version, it rebuilds from `.md` files on disk. There is no automatic stale-cache detection. If a SQLite mutation fails and you want a fresh index, `rm ~/.cache/mddb/<sha1(abs-path)>/index.sqlite` and reopen.
 
 ### SQLite
 
+Column shape below (the exact DDL — `NOT NULL`/`UNIQUE` constraints, `entry_fields` indexes, and the FTS sync triggers — lives in `schema.sql`):
+
 ```sql
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
-CREATE TABLE entries(rowid INTEGER PRIMARY KEY, id TEXT UNIQUE, relpath TEXT UNIQUE, title TEXT, summary TEXT, yaml_text TEXT, body TEXT);
+CREATE TABLE entries(rowid INTEGER PRIMARY KEY, id TEXT UNIQUE, relpath TEXT UNIQUE, title TEXT, summary TEXT, blob_relpath TEXT, yaml_text TEXT, body TEXT);
 CREATE TABLE entry_fields(entry_rowid INTEGER, key TEXT, value_str TEXT, value_num REAL);
 CREATE VIRTUAL TABLE entries_fts USING fts5(yaml_text, body, content='entries', content_rowid='rowid');
 ```
 
-`title` and `summary` are promoted to dedicated nullable columns on `entries` because they are part of the substrate filing/disclosure vocabulary; `db.list()` reads them directly. `entry_fields` indexes every *other* top-level scalar and list-of-scalars from `card.yaml` (notably `tags`) but skips `title` and `summary` (they have their own columns).
+`title` and `summary` are promoted to dedicated nullable columns on `entries` because they are part of the substrate filing/disclosure vocabulary; `db.list()` reads them directly. `blob_relpath` is likewise a dedicated nullable column — a derived cache of `blob_on_disk(card)` (see "Blob cards"), refreshed on every create/move/update and rebuilt by the cache rebuild, so `db.list()` reports blob presence in bulk without a per-card filesystem scan. The substrate computes that column from disk, not from YAML, so the derived column is never an `entry_fields` row. `entry_fields` indexes every *other* top-level scalar and list-of-scalars from `card.yaml` (notably `tags`) but skips `title`/`summary` (their own dedicated columns).
 
 SQLite default journal mode (single-writer). FTS sync via the standard external-content triggers (AI / AD / AU with the `'delete'` row idiom). `entries.body` and `entries.yaml_text` duplicate disk content for FTS; reads always go to disk.
 
@@ -211,7 +249,7 @@ If a particular query pattern shows up repeatedly in caller code, abstract it *i
 
 ### Edits
 
-`db.editor(rationale=...)` is the only mutation primitive. It returns a context manager that buffers `create`/`update`/`delete`/`move`/`edit` and materialises them as one git commit + one SQLite transaction on clean `__exit__`. `editor.read()` sees the staged buffer; it is not itself buffered. On body exception, the buffer is dropped and the mddb root is untouched.
+`db.editor(rationale=...)` is the only mutation primitive. It returns a context manager that buffers `create`/`update`/`delete`/`move`/`edit` and materialises them as one git commit + one SQLite transaction on clean `__exit__`. `editor.read()` sees staged content (create/update); it is not itself buffered. For a staged *move* it returns committed disk state — `Card` has no relpath field, so `.blob` reflects the pre-move location until materialise; read it back after the block for the final path. On body exception, the buffer is dropped and the mddb root is untouched.
 
 ```python
 with db.editor(rationale="bulk import of inventory cards") as editor:
@@ -272,11 +310,11 @@ Three disclosure levels — `id` → `title` → `summary` → full card. This i
 for cid, title in db.conn.execute("SELECT id, title FROM entries"):
     ...
 
-# Level 2: summary view — id, title, summary (this is what db.list() returns)
+# Level 2: summary view — id, title, summary, blob_relpath (this is what db.list() returns)
 for entry in db.list():
-    print(entry["id"], entry["title"], "—", entry["summary"])
+    print(entry["id"], entry["title"], "—", entry["summary"], entry["blob_relpath"])
 
-# Level 3: full card
+# Level 3: full card (+ card.blob: Path | None, stamped from disk)
 card = db.read(some_id)
 card.title       # raises KeyError if 'title' is missing
 card.summary     # raises KeyError if 'summary' is missing
@@ -340,3 +378,7 @@ Other ruff defaults are left alone.
 - `editor` commits only the paths it touched (via `git commit -- <paths>`); pre-staged unrelated changes in the caller's working tree are left staged, not swept into the editor's commit.
 - SQLite is disposable; `.md` files and git are truth.
 - Concurrent writers from another process are outside the prototype contract.
+- A card owns the single non-`.md`, nonempty-suffix file in its directory whose stem **exactly** equals the card's stem. Exact-stem (not prefix): `notes.extra.pdf` belongs to `notes.extra.md`, not `notes.md`. Two qualifying siblings → `ValueError` (drift) at read/rebuild/lifecycle.
+- `card.blob` is a `Path` (or `None`), not bytes — read bytes with `card.blob.read_bytes()` or stream with `card.blob.open("rb")`. It is stamped by `MDDB.read` from disk, not carried in the `.md`; `str(card)` does not include it, and it's excluded from `Card` equality. `editor.create` returns a card with `blob=None` (the file isn't written until commit) — re-read via `db.read` to get the path.
+- `blob_ext` is single-suffix only: `editor.create(blob=..., blob_ext=".tar.gz")` raises. Use `.tgz`/`.tbz` for archives. A `Path` blob with a multi-suffix name (`archive.tar.gz`) needs an explicit single-suffix `blob_ext`.
+- Blob discovery is filesystem-based (like card discovery). A manually-dropped binary beside a card *is* its blob on the next `db.read`/rebuild — and `editor.move`/`delete` will try to `git mv`/`git rm` it; if it's untracked, the lifecycle plan phase raises `ValueError` before any mutation. `git add` it (or write it via `editor.create(blob=...)`) first.

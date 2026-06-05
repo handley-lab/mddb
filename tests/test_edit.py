@@ -1116,3 +1116,189 @@ def test_create_blob_commit_includes_both_files(db):
     out = db._git("show", "--name-only", "--pretty=format:", "HEAD").stdout
     committed = {line.strip() for line in out.splitlines() if line.strip()}
     assert committed == {"a.md", "a.pdf"}
+
+
+def _commit_blob_card(db, relpath="papers/a.md", ext=".pdf", data=b"%PDF"):
+    with db.editor(rationale="seed blob card") as editor:
+        card = editor.create(
+            title="A", summary="A", relpath=relpath, blob=data, blob_ext=ext
+        )
+    return card
+
+
+def test_move_carries_blob(db):
+    card = _commit_blob_card(db)
+    with db.editor(rationale="archive") as editor:
+        editor.move(card.id, "archive/a.md")
+    assert not (db.root / "papers/a.md").exists()
+    assert not (db.root / "papers/a.pdf").exists()
+    assert (db.root / "archive/a.md").exists()
+    assert db.read(card.id).blob == db.root / "archive/a.pdf"
+    assert (db.root / "archive/a.pdf").read_bytes() == b"%PDF"
+
+
+def test_delete_removes_blob(db):
+    card = _commit_blob_card(db)
+    with db.editor(rationale="discard") as editor:
+        editor.delete(card.id)
+    assert not (db.root / "papers/a.md").exists()
+    assert not (db.root / "papers/a.pdf").exists()
+    with pytest.raises(KeyError):
+        db.read(card.id)
+
+
+def test_move_dotted_stem_blob(db):
+    card = _commit_blob_card(db, relpath="papers/2025.return.md")
+    with db.editor(rationale="archive dotted") as editor:
+        editor.move(card.id, "archive/2025.return.md")
+    assert db.read(card.id).blob == db.root / "archive/2025.return.pdf"
+    assert not (db.root / "papers/2025.return.pdf").exists()
+
+
+def test_move_leaves_longer_stem_sibling_blob(db):
+    # notes.md and notes.extra.md (a blob card); moving notes.md must not
+    # touch notes.extra.pdf (which belongs to notes.extra.md).
+    with db.editor(rationale="seed two cards") as editor:
+        notes = editor.create(title="Notes", summary="n", relpath="space/notes.md")
+        editor.create(
+            title="Extra",
+            summary="e",
+            relpath="space/notes.extra.md",
+            blob=b"extra",
+            blob_ext=".pdf",
+        )
+    with db.editor(rationale="move notes") as editor:
+        editor.move(notes.id, "archive/notes.md")
+    assert (db.root / "space/notes.extra.md").exists()
+    assert (db.root / "space/notes.extra.pdf").read_bytes() == b"extra"
+    assert not (db.root / "archive/notes.extra.pdf").exists()
+
+
+def test_delete_leaves_longer_stem_sibling_blob(db):
+    with db.editor(rationale="seed two cards") as editor:
+        notes = editor.create(title="Notes", summary="n", relpath="space/notes.md")
+        editor.create(
+            title="Extra",
+            summary="e",
+            relpath="space/notes.extra.md",
+            blob=b"extra",
+            blob_ext=".pdf",
+        )
+    with db.editor(rationale="delete notes") as editor:
+        editor.delete(notes.id)
+    assert (db.root / "space/notes.extra.md").exists()
+    assert (db.root / "space/notes.extra.pdf").read_bytes() == b"extra"
+
+
+def test_move_blob_collision_at_target_raises_clean(db):
+    card = _commit_blob_card(db, relpath="papers/a.md")
+    # a different blob already sits at the move target's stem
+    (db.root / "archive").mkdir()
+    (db.root / "archive" / "a.pdf").write_bytes(b"blocker")
+    db._git("add", "--", "archive/a.pdf")
+    db._git("commit", "-q", "-m", "blocker")
+    with pytest.raises(FileExistsError):
+        with db.editor(rationale="collide") as editor:
+            editor.move(card.id, "archive/a.md")
+    # clean tree: nothing moved
+    assert (db.root / "papers/a.md").exists()
+    assert (db.root / "papers/a.pdf").exists()
+    assert (db.root / "archive/a.pdf").read_bytes() == b"blocker"
+    assert not (db.root / "archive/a.md").exists()
+    status = db._git("status", "--porcelain", "--untracked-files=no").stdout
+    assert status == ""
+
+
+def test_create_then_delete_with_blob_writes_nothing(db):
+    before = _git_log_count(db)
+    with db.editor(rationale="create+delete") as editor:
+        card = editor.create(
+            title="A", summary="A", relpath="papers/a.md", blob=b"x", blob_ext=".pdf"
+        )
+        editor.delete(card.id)
+    assert _git_log_count(db) == before
+    assert not (db.root / "papers/a.md").exists()
+    assert not (db.root / "papers/a.pdf").exists()
+
+
+def test_delete_then_create_blob_same_relpath(db):
+    old = _commit_blob_card(db, relpath="receipts/x.md", data=b"v1")
+    with db.editor(rationale="replace") as editor:
+        editor.delete(old.id)
+        new = editor.create(
+            title="V2",
+            summary="v2",
+            relpath="receipts/x.md",
+            blob=b"v2",
+            blob_ext=".pdf",
+        )
+    assert (db.root / "receipts/x.pdf").read_bytes() == b"v2"
+    assert db.read(new.id).blob == db.root / "receipts/x.pdf"
+    with pytest.raises(KeyError):
+        db.read(old.id)
+
+
+def test_create_with_blob_overwrite_collision_raises_clean(db):
+    # a different same-stem file already exists where a create-with-blob
+    # would land -> two-blob drift, must raise before any mutation.
+    with db.editor(rationale="seed dir") as editor:
+        editor.create(title="Keep", summary="k", relpath="d/keep.md")
+    (db.root / "d" / "a.png").write_bytes(b"png")
+    db._git("add", "--", "d/a.png")
+    db._git("commit", "-q", "-m", "stray png")
+    before = _git_log_count(db)
+    with pytest.raises(FileExistsError):
+        with db.editor(rationale="collide") as editor:
+            editor.create(
+                title="A", summary="A", relpath="d/a.md", blob=b"x", blob_ext=".pdf"
+            )
+    assert _git_log_count(db) == before
+    assert not (db.root / "d/a.md").exists()
+    assert not (db.root / "d/a.pdf").exists()
+    assert (db.root / "d/a.png").read_bytes() == b"png"
+
+
+def test_move_untracked_blob_raises_clean(db, seed):
+    card = seed(title="Scan", summary="s", relpath="receipts/scan.md")
+    (db.root / "receipts" / "scan.pdf").write_bytes(b"%PDF")  # NOT git added
+    with pytest.raises(ValueError, match="untracked"):
+        with db.editor(rationale="move untracked") as editor:
+            editor.move(card.id, "archive/scan.md")
+    assert (db.root / "receipts/scan.md").exists()
+    assert not (db.root / "archive/scan.md").exists()
+
+
+def test_move_no_blob_card_adopts_destination_blob(db, seed):
+    card = seed(title="Note", summary="n", relpath="inbox/note.md")
+    (db.root / "archive").mkdir()
+    (db.root / "archive" / "note.pdf").write_bytes(b"orphan")
+    db._git("add", "--", "archive/note.pdf")
+    db._git("commit", "-q", "-m", "orphan blob")
+    with db.editor(rationale="move onto orphan") as editor:
+        editor.move(card.id, "archive/note.md")
+    assert db.read(card.id).blob == db.root / "archive/note.pdf"
+    entry = next(e for e in db.list() if e["id"] == card.id)
+    assert entry["blob_relpath"] == "archive/note.pdf"
+
+
+def test_delete_untracked_blob_raises_clean(db, seed):
+    card = seed(title="Scan", summary="s", relpath="receipts/scan.md")
+    (db.root / "receipts" / "scan.pdf").write_bytes(b"%PDF")  # NOT git added
+    with pytest.raises(ValueError, match="untracked"):
+        with db.editor(rationale="delete untracked") as editor:
+            editor.delete(card.id)
+    assert (db.root / "receipts/scan.md").exists()
+    assert (db.root / "receipts/scan.pdf").exists()
+
+
+def test_move_and_edit_carries_blob(db):
+    card = _commit_blob_card(db, relpath="papers/a.md")
+    with db.editor(rationale="move + edit") as editor:
+        editor.move(card.id, "archive/a.md")
+        fresh = editor.read(card.id)
+        editor.update(fresh, summary="updated")
+    again = db.read(card.id)
+    assert again.summary == "updated"
+    assert again.blob == db.root / "archive/a.pdf"
+    assert (db.root / "archive/a.pdf").read_bytes() == b"%PDF"
+    assert not (db.root / "papers/a.pdf").exists()

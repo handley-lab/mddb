@@ -242,42 +242,123 @@ class _Editor:
     def _materialise(self) -> None:
         """Apply the staged batch as one git commit + one SQLite transaction.
 
-        Phases: filesystem deletes → moves → writes/adds → git commit →
-        SQLite cache sync (insert/update/delete inside ``with self._db.conn:``).
-        The git commit is path-restricted to the relpaths this editor touched
-        so unrelated pre-staged changes in the working tree stay staged.
+        The batch is planned and fully checked before any filesystem/git
+        mutation, so every raise leaves the working tree clean. The plan
+        computes, for every surviving card, the one blob relpath it will own
+        (``final_blob``) — the same value index-sync caches, so ``db.list()``
+        (column) never disagrees with ``db.read()`` (live ``blob_on_disk``).
+
+        Phases: snapshot deletes → plan + collision/trackedness preflight →
+        filesystem deletes → moves → writes/adds → git commit → SQLite sync.
+        The commit is path-restricted to the relpaths this editor touched so
+        unrelated pre-staged working-tree changes stay staged.
         """
         for staged in self._staged.values():
             if not isinstance(staged, (_Create, _Update, _Move, _Delete)):
                 raise TypeError(f"unknown staged variant: {type(staged).__name__}")
+        root = self._db.root
+
+        delete_blobs: dict[str, str] = {}  # card_id -> blob relpath to remove
+        deleted_paths: set[str] = set()
+        for card_id, staged in self._staged.items():
+            if isinstance(staged, _Delete):
+                deleted_paths.add(staged.original_relpath)
+                old = _index.blob_on_disk(root / staged.original_relpath)
+                if old is not None:
+                    rel = str(old.relative_to(root))
+                    delete_blobs[card_id] = rel
+                    deleted_paths.add(rel)
+        deleted_abs = {root / p for p in deleted_paths}
+
+        planned_targets: set[str] = set()
+        final_blob: dict[str, str | None] = {}
+        blob_moves: list[tuple[str, str]] = []
+
+        def claim(target: str) -> None:
+            if target in planned_targets or (
+                (root / target).exists() and target not in deleted_paths
+            ):
+                raise FileExistsError(target)
+            planned_targets.add(target)
+
+        for card_id, staged in self._staged.items():
+            if isinstance(staged, _Delete):
+                continue
+            relpath = staged.relpath
+            moved = (
+                isinstance(staged, (_Move, _Update))
+                and relpath != staged.original_relpath
+            )
+            target: str | None = None
+            if isinstance(staged, _Create) and staged.blob is not None:
+                target = _blob_at(relpath, staged.blob[1])
+            elif moved:
+                old = _index.blob_on_disk(
+                    root / staged.original_relpath, ignore=deleted_abs
+                )
+                if old is not None:
+                    target = _blob_at(relpath, old.suffix)
+                    blob_moves.append((str(old.relative_to(root)), target))
+            if isinstance(staged, (_Create, _Move)) or moved:
+                claim(relpath)
+            if target is not None:
+                claim(target)
+                existing = _index.blob_on_disk(root / relpath, ignore=deleted_abs)
+                if existing is not None and str(existing.relative_to(root)) != target:
+                    raise FileExistsError(target)
+                final_blob[card_id] = target
+            else:
+                existing = _index.blob_on_disk(root / relpath, ignore=deleted_abs)
+                final_blob[card_id] = (
+                    str(existing.relative_to(root)) if existing else None
+                )
+
+        lifecycle_blobs = [old for old, _ in blob_moves] + list(delete_blobs.values())
+        if lifecycle_blobs:
+            out = self._db._git("ls-files", "-z", "--", *lifecycle_blobs).stdout
+            tracked = {p for p in out.split("\x00") if p}
+            for blob_relpath in lifecycle_blobs:
+                if blob_relpath not in tracked:
+                    raise ValueError(
+                        f"blob {blob_relpath} is untracked; git add it before move/delete"
+                    )
+
         touched: set[str] = set()
-        for staged in self._staged.values():
+        for card_id, staged in self._staged.items():
             if isinstance(staged, _Delete):
                 self._db._git("rm", "--", staged.original_relpath)
                 touched.add(staged.original_relpath)
+                if card_id in delete_blobs:
+                    self._db._git("rm", "--", delete_blobs[card_id])
+                    touched.add(delete_blobs[card_id])
         for staged in self._staged.values():
             if isinstance(staged, (_Move, _Update)) and (
                 staged.relpath != staged.original_relpath
             ):
-                (self._db.root / staged.relpath).parent.mkdir(
-                    parents=True, exist_ok=True
-                )
+                (root / staged.relpath).parent.mkdir(parents=True, exist_ok=True)
                 self._db._git("mv", "--", staged.original_relpath, staged.relpath)
                 touched.add(staged.original_relpath)
                 touched.add(staged.relpath)
+        for old_blob, new_blob in blob_moves:
+            (root / new_blob).parent.mkdir(parents=True, exist_ok=True)
+            self._db._git("mv", "--", old_blob, new_blob)
+            touched.add(old_blob)
+            touched.add(new_blob)
         for staged in self._staged.values():
             if isinstance(staged, (_Create, _Update)):
-                target = self._db.root / staged.relpath
-                target.parent.mkdir(parents=True, exist_ok=True)
-                tmp = target.with_suffix(target.suffix + f".{uuid.uuid4().hex}.tmp")
+                target_path = root / staged.relpath
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = target_path.with_suffix(
+                    target_path.suffix + f".{uuid.uuid4().hex}.tmp"
+                )
                 tmp.write_text(str(staged.card))
-                os.replace(tmp, target)
+                os.replace(tmp, target_path)
                 self._db._git("add", "--", staged.relpath)
                 touched.add(staged.relpath)
                 if isinstance(staged, _Create) and staged.blob is not None:
                     blob_bytes, ext = staged.blob
                     blob_relpath = _blob_at(staged.relpath, ext)
-                    blob_target = self._db.root / blob_relpath
+                    blob_target = root / blob_relpath
                     blob_tmp = blob_target.with_suffix(
                         blob_target.suffix + f".{uuid.uuid4().hex}.tmp"
                     )
@@ -290,20 +371,17 @@ class _Editor:
             for card_id, staged in self._staged.items():
                 if isinstance(staged, _Delete):
                     _index.delete(self._db.conn, card_id)
-                    continue
-                blob = _index.blob_on_disk(self._db.root / staged.relpath)
-                blob_relpath = str(blob.relative_to(self._db.root)) if blob else None
-                if isinstance(staged, _Create):
+                elif isinstance(staged, _Create):
                     _index.insert(
-                        self._db.conn, staged.card, staged.relpath, blob_relpath
+                        self._db.conn, staged.card, staged.relpath, final_blob[card_id]
                     )
                 elif isinstance(staged, _Move):
                     _index.update_paths(
-                        self._db.conn, card_id, staged.relpath, blob_relpath
+                        self._db.conn, card_id, staged.relpath, final_blob[card_id]
                     )
                 elif isinstance(staged, _Update):
                     _index.update_paths(
-                        self._db.conn, card_id, staged.relpath, blob_relpath
+                        self._db.conn, card_id, staged.relpath, final_blob[card_id]
                     )
                     _index.update_content(self._db.conn, staged.card)
                 else:

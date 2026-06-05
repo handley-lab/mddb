@@ -247,14 +247,16 @@ def _seed_card_with_manual_blob(db, seed):
     return db2, card
 
 
-def test_move_clears_stale_blob_relpath(db, seed):
+def test_move_carries_manual_blob(db, seed):
     db2, card = _seed_card_with_manual_blob(db, seed)
     before = next(x for x in db2.list() if x["id"] == card.id)
     assert before["blob_relpath"] == "receipts/scan.pdf"
     with db2.editor(rationale="archive") as ed:
         ed.move(card.id, "archive/scan.md")
     after = next(x for x in db2.list() if x["id"] == card.id)
-    assert after["blob_relpath"] is None
+    assert after["blob_relpath"] == "archive/scan.pdf"
+    assert (db2.root / "archive/scan.pdf").read_bytes() == b"%PDF"
+    assert not (db2.root / "receipts/scan.pdf").exists()
 
 
 def test_content_update_preserves_blob_relpath(db, seed):

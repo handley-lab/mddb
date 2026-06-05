@@ -11,7 +11,7 @@ import yaml
 
 from .card import Card
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 _SCHEMA = (Path(__file__).parent / "schema.sql").read_text()
 
 
@@ -85,7 +85,14 @@ def rebuild_index(root: Path) -> sqlite3.Connection:
         for md_path in sorted(root.rglob("*.md")):
             if ".git" in md_path.relative_to(root).parts:
                 continue
-            insert(conn, Card.from_file(md_path), str(md_path.relative_to(root)))
+            blob = blob_on_disk(md_path)
+            blob_relpath = str(blob.relative_to(root)) if blob else None
+            insert(
+                conn,
+                Card.from_file(md_path),
+                str(md_path.relative_to(root)),
+                blob_relpath,
+            )
     return conn
 
 
@@ -103,16 +110,60 @@ def relpath_of(conn: sqlite3.Connection, card_id: str) -> str:
     return row[0]
 
 
-def insert(conn: sqlite3.Connection, card: Card, relpath: str) -> None:
-    """Cache a new card. Caller must already have written the file + committed."""
+def blob_on_disk(
+    card_abs_path: Path, ignore: frozenset[Path] = frozenset()
+) -> Path | None:
+    """Return the absolute path of the card's blob, or ``None``.
+
+    The blob is the single sibling of ``card_abs_path`` whose suffix is
+    neither ``""`` nor ``.md`` and whose stem equals the card's stem,
+    excluding any path in ``ignore`` (used to filter staged-deleted blobs
+    during a batch). Returns ``None`` if the parent directory does not exist
+    (a card staged into a new subdir has no sibling blob).
+
+    Raises:
+        ValueError: more than one qualifying file remains — drift the cache
+            cannot represent.
+    """
+    parent = card_abs_path.parent
+    if not parent.is_dir():
+        return None
+    stem = card_abs_path.stem
+    hits = [
+        p
+        for p in parent.iterdir()
+        if p.is_file()
+        and p not in ignore
+        and p.suffix not in ("", ".md")
+        and p.stem == stem
+    ]
+    if len(hits) > 1:
+        raise ValueError(
+            f"multiple blobs for {card_abs_path.name}: {sorted(p.name for p in hits)}"
+        )
+    return hits[0] if hits else None
+
+
+def insert(
+    conn: sqlite3.Connection,
+    card: Card,
+    relpath: str,
+    blob_relpath: str | None = None,
+) -> None:
+    """Cache a new card. Caller must already have written the file + committed.
+
+    ``blob_relpath`` is the relpath of the card's blob, or ``None`` when it
+    has none (a real state, not an omitted argument).
+    """
     cur = conn.execute(
-        "INSERT INTO entries(id, relpath, title, summary, yaml_text, body) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO entries(id, relpath, title, summary, blob_relpath, yaml_text, body) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
             card.id,
             relpath,
             card.yaml.get("title"),
             card.yaml.get("summary"),
+            blob_relpath,
             _yaml_text(card),
             card.body,
         ),
@@ -140,9 +191,19 @@ def update_content(conn: sqlite3.Connection, card: Card) -> None:
     index_fields(conn, rowid, card.yaml)
 
 
-def update_relpath(conn: sqlite3.Connection, card_id: str, relpath: str) -> None:
-    """Point the cache at a new on-disk path for ``card_id``."""
-    conn.execute("UPDATE entries SET relpath = ? WHERE id = ?", (relpath, card_id))
+def update_paths(
+    conn: sqlite3.Connection, card_id: str, relpath: str, blob_relpath: str | None
+) -> None:
+    """Point the cache at a new on-disk relpath and blob for ``card_id``.
+
+    ``blob_relpath`` is the relpath of the card's blob at its (possibly new)
+    location, or ``None`` when it has none — always the computed truth, so a
+    move/update never leaves a stale blob path.
+    """
+    conn.execute(
+        "UPDATE entries SET relpath = ?, blob_relpath = ? WHERE id = ?",
+        (relpath, blob_relpath, card_id),
+    )
 
 
 def delete(conn: sqlite3.Connection, card_id: str) -> None:
@@ -151,10 +212,13 @@ def delete(conn: sqlite3.Connection, card_id: str) -> None:
 
 
 def list_progressive(conn: sqlite3.Connection) -> list[dict]:
-    """Return ``[{id, title, summary}, ...]`` for every cached card."""
-    rows = conn.execute("SELECT id, title, summary FROM entries").fetchall()
+    """Return ``[{id, title, summary, blob_relpath}, ...]`` for every cached card."""
+    rows = conn.execute(
+        "SELECT id, title, summary, blob_relpath FROM entries"
+    ).fetchall()
     return [
-        {"id": cid, "title": title, "summary": summary} for cid, title, summary in rows
+        {"id": cid, "title": title, "summary": summary, "blob_relpath": blob_relpath}
+        for cid, title, summary, blob_relpath in rows
     ]
 
 

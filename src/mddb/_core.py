@@ -61,14 +61,20 @@ class MDDB:
             card_id: The card's ``id`` (the value at ``yaml["id"]``).
 
         Returns:
-            The :class:`Card` as parsed from its current file.
+            The :class:`Card` as parsed from its current file, with
+            :attr:`Card.blob` set to the absolute path of its binary blob
+            (discovered on disk), or ``None`` when it has none.
 
         Raises:
             KeyError: No card with that ``id`` is known to the _index.
             FileNotFoundError: The index points at a path that no longer
                 exists on disk.
+            ValueError: Two same-stem blobs sit beside the card (drift).
         """
-        return Card.from_file(self.root / _index.relpath_of(self.conn, card_id))
+        relpath = _index.relpath_of(self.conn, card_id)
+        card = Card.from_file(self.root / relpath)
+        card.blob = _index.blob_on_disk(self.root / relpath)
+        return card
 
     def list(self) -> list[dict]:
         """Return every card's id, title, and summary — the progressive-disclosure summary view.
@@ -78,9 +84,11 @@ class MDDB:
         full card once a caller has decided which one to open.
 
         Returns:
-            A list of ``{"id": str, "title": str | None, "summary": str | None}``
-            dicts, one per card. ``title`` and ``summary`` come back as
-            ``None`` for cards missing those keys.
+            A list of ``{"id": str, "title": str | None, "summary": str | None,
+            "blob_relpath": str | None}`` dicts, one per card. ``title`` and
+            ``summary`` come back as ``None`` for cards missing those keys;
+            ``blob_relpath`` is the relpath of the card's binary blob (see
+            :attr:`Card.blob`), or ``None`` when it has none.
         """
         return _index.list_progressive(self.conn)
 
@@ -162,6 +170,7 @@ def _validate_in_root(root: Path, relpath: str) -> None:
 class _Create:
     card: Card
     relpath: str
+    blob: tuple[bytes, str] | None = None
 
 
 @dataclass
@@ -222,49 +231,146 @@ class _Editor:
     def _materialise(self) -> None:
         """Apply the staged batch as one git commit + one SQLite transaction.
 
-        Phases: filesystem deletes → moves → writes/adds → git commit →
-        SQLite cache sync (insert/update/delete inside ``with self._db.conn:``).
-        The git commit is path-restricted to the relpaths this editor touched
-        so unrelated pre-staged changes in the working tree stay staged.
+        The batch is planned and fully checked before any filesystem/git
+        mutation, so every raise leaves the working tree clean. The plan
+        computes, for every surviving card, the one blob relpath it will own
+        (``final_blob``) — the same value index-sync caches, so ``db.list()``
+        (column) never disagrees with ``db.read()`` (live ``blob_on_disk``).
+
+        Phases: snapshot deletes → plan + collision/trackedness preflight →
+        filesystem deletes → moves → writes/adds → git commit → SQLite sync.
+        The commit is path-restricted to the relpaths this editor touched so
+        unrelated pre-staged working-tree changes stay staged.
         """
         for staged in self._staged.values():
             if not isinstance(staged, (_Create, _Update, _Move, _Delete)):
                 raise TypeError(f"unknown staged variant: {type(staged).__name__}")
+        root = self._db.root
+
+        delete_blobs: dict[str, str] = {}
+        deleted_paths: set[str] = set()
+        for card_id, staged in self._staged.items():
+            if isinstance(staged, _Delete):
+                deleted_paths.add(staged.original_relpath)
+                old = _index.blob_on_disk(root / staged.original_relpath)
+                if old is not None:
+                    rel = str(old.relative_to(root))
+                    delete_blobs[card_id] = rel
+                    deleted_paths.add(rel)
+        deleted_abs = {root / p for p in deleted_paths}
+
+        planned_targets: set[str] = set()
+        final_blob: dict[str, str | None] = {}
+        blob_moves: list[tuple[str, str]] = []
+
+        def claim(target: str) -> None:
+            if target in planned_targets or (
+                (root / target).exists() and target not in deleted_paths
+            ):
+                raise FileExistsError(target)
+            planned_targets.add(target)
+
+        for card_id, staged in self._staged.items():
+            if isinstance(staged, _Delete):
+                continue
+            relpath = staged.relpath
+            moved = (
+                isinstance(staged, (_Move, _Update))
+                and relpath != staged.original_relpath
+            )
+            target: str | None = None
+            if isinstance(staged, _Create) and staged.blob is not None:
+                target = str(Path(relpath).with_suffix(staged.blob[1]))
+            elif moved:
+                old = _index.blob_on_disk(
+                    root / staged.original_relpath, ignore=deleted_abs
+                )
+                if old is not None:
+                    target = str(Path(relpath).with_suffix(old.suffix))
+                    blob_moves.append((str(old.relative_to(root)), target))
+            if isinstance(staged, (_Create, _Move)) or moved:
+                claim(relpath)
+            existing = _index.blob_on_disk(root / relpath, ignore=deleted_abs)
+            if target is not None:
+                if existing is not None and str(existing.relative_to(root)) != target:
+                    raise FileExistsError(target)
+                claim(target)
+                final_blob[card_id] = target
+            else:
+                final_blob[card_id] = (
+                    str(existing.relative_to(root)) if existing else None
+                )
+
+        lifecycle_blobs = [old for old, _ in blob_moves] + list(delete_blobs.values())
+        if lifecycle_blobs:
+            out = self._db._git("ls-files", "-z", "--", *lifecycle_blobs).stdout
+            tracked = {p for p in out.split("\x00") if p}
+            for blob_relpath in lifecycle_blobs:
+                if blob_relpath not in tracked:
+                    raise ValueError(
+                        f"blob {blob_relpath} is untracked; git add it before move/delete"
+                    )
+
         touched: set[str] = set()
-        for staged in self._staged.values():
+        for card_id, staged in self._staged.items():
             if isinstance(staged, _Delete):
                 self._db._git("rm", "--", staged.original_relpath)
                 touched.add(staged.original_relpath)
+                if card_id in delete_blobs:
+                    self._db._git("rm", "--", delete_blobs[card_id])
+                    touched.add(delete_blobs[card_id])
         for staged in self._staged.values():
             if isinstance(staged, (_Move, _Update)) and (
                 staged.relpath != staged.original_relpath
             ):
-                (self._db.root / staged.relpath).parent.mkdir(
-                    parents=True, exist_ok=True
-                )
+                (root / staged.relpath).parent.mkdir(parents=True, exist_ok=True)
                 self._db._git("mv", "--", staged.original_relpath, staged.relpath)
                 touched.add(staged.original_relpath)
                 touched.add(staged.relpath)
+        for old_blob, new_blob in blob_moves:
+            (root / new_blob).parent.mkdir(parents=True, exist_ok=True)
+            self._db._git("mv", "--", old_blob, new_blob)
+            touched.add(old_blob)
+            touched.add(new_blob)
         for staged in self._staged.values():
             if isinstance(staged, (_Create, _Update)):
-                target = self._db.root / staged.relpath
-                target.parent.mkdir(parents=True, exist_ok=True)
-                tmp = target.with_suffix(target.suffix + f".{uuid.uuid4().hex}.tmp")
+                target_path = root / staged.relpath
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = target_path.with_suffix(
+                    target_path.suffix + f".{uuid.uuid4().hex}.tmp"
+                )
                 tmp.write_text(str(staged.card))
-                os.replace(tmp, target)
+                os.replace(tmp, target_path)
                 self._db._git("add", "--", staged.relpath)
                 touched.add(staged.relpath)
+                if isinstance(staged, _Create) and staged.blob is not None:
+                    blob_bytes, ext = staged.blob
+                    blob_relpath = str(Path(staged.relpath).with_suffix(ext))
+                    blob_target = root / blob_relpath
+                    blob_tmp = blob_target.with_suffix(
+                        blob_target.suffix + f".{uuid.uuid4().hex}.tmp"
+                    )
+                    blob_tmp.write_bytes(blob_bytes)
+                    os.replace(blob_tmp, blob_target)
+                    self._db._git("add", "--", blob_relpath)
+                    touched.add(blob_relpath)
         self._db._git("commit", "-m", self._rationale, "--", *sorted(touched))
         with self._db.conn:
             for card_id, staged in self._staged.items():
                 if isinstance(staged, _Delete):
                     _index.delete(self._db.conn, card_id)
                 elif isinstance(staged, _Create):
-                    _index.insert(self._db.conn, staged.card, staged.relpath)
+                    _index.insert(
+                        self._db.conn, staged.card, staged.relpath, final_blob[card_id]
+                    )
                 elif isinstance(staged, _Move):
-                    _index.update_relpath(self._db.conn, card_id, staged.relpath)
+                    _index.update_paths(
+                        self._db.conn, card_id, staged.relpath, final_blob[card_id]
+                    )
                 elif isinstance(staged, _Update):
-                    _index.update_relpath(self._db.conn, card_id, staged.relpath)
+                    _index.update_paths(
+                        self._db.conn, card_id, staged.relpath, final_blob[card_id]
+                    )
                     _index.update_content(self._db.conn, staged.card)
                 else:
                     raise TypeError(f"unknown staged variant: {type(staged).__name__}")
@@ -278,6 +384,8 @@ class _Editor:
         body: str = "",
         relpath: str = "",
         tags: Sequence[str] | None = None,
+        blob: Path | bytes | None = None,
+        blob_ext: str = "",
     ) -> Card:
         """Stage a new card for creation. Materialises on clean ``__exit__``.
 
@@ -293,9 +401,25 @@ class _Editor:
             - non-empty sequence: replace; ``tags=`` wins over any
               ``yaml["tags"]`` value.
 
+        ``blob`` attaches one binary file beside the card (sharing its stem).
+        A ``Path`` source is read eagerly; ``bytes`` are used directly.
+        ``blob_ext`` is the single-suffix extension (``".pdf"``); it is
+        required for ``bytes`` and overrides a ``Path``'s suffix. If omitted
+        for a ``Path`` with exactly one suffix, that suffix is used. The blob
+        file is written at materialise time; collision/adoption against
+        existing files is resolved then, not here. The returned card's
+        :attr:`Card.blob` is ``None`` (the file does not exist until commit);
+        read it back via :meth:`MDDB.read` after the editor block.
+
         Required kwargs (``title``, ``summary``) win over any matching keys
         in ``yaml=``. ``id`` from ``yaml=`` is preserved verbatim (any
         value); a UUIDv4 is generated only when ``id`` is absent.
+
+        Raises:
+            ValueError: ``blob`` given without a derivable single-suffix ext;
+                a multi-part or ``.md`` ``blob_ext``; a destination blob
+                relpath outside the deck root. (The ``blob`` source ``Path``
+                itself may be anywhere; its bytes are read eagerly.)
         """
         if self._closed:
             raise RuntimeError("editor already closed")
@@ -334,7 +458,26 @@ class _Editor:
             for s in self._staged.values()
         ):
             raise FileExistsError(resolved)
-        self._staged[new_card.id] = _Create(card=new_card, relpath=resolved)
+        staged_blob: tuple[bytes, str] | None = None
+        if blob is not None:
+            if blob_ext:
+                ext = blob_ext if blob_ext.startswith(".") else f".{blob_ext}"
+            elif isinstance(blob, Path) and len(blob.suffixes) == 1:
+                ext = blob.suffix
+            else:
+                raise ValueError(
+                    "blob requires blob_ext, or a Path with exactly one suffix"
+                )
+            if "." in ext[1:]:
+                raise ValueError(f"blob_ext must be a single suffix: {ext}")
+            if ext == ".md":
+                raise ValueError("blob_ext cannot be .md")
+            _validate_in_root(self._db.root, str(Path(resolved).with_suffix(ext)))
+            blob_bytes = blob.read_bytes() if isinstance(blob, Path) else bytes(blob)
+            staged_blob = (blob_bytes, ext)
+        self._staged[new_card.id] = _Create(
+            card=new_card, relpath=resolved, blob=staged_blob
+        )
         return new_card.copy()
 
     def read(self, card_id: str) -> Card:
@@ -441,7 +584,9 @@ class _Editor:
                 card=staged_card, original_relpath=original, relpath=original
             )
         elif isinstance(staged, _Create):
-            self._staged[card.id] = _Create(card=staged_card, relpath=staged.relpath)
+            self._staged[card.id] = _Create(
+                card=staged_card, relpath=staged.relpath, blob=staged.blob
+            )
         elif isinstance(staged, (_Update, _Move)):
             self._staged[card.id] = _Update(
                 card=staged_card,
@@ -514,7 +659,9 @@ class _Editor:
             )
             return
         if isinstance(staged, _Create):
-            self._staged[card_id] = _Create(card=staged.card, relpath=new_relpath)
+            self._staged[card_id] = _Create(
+                card=staged.card, relpath=new_relpath, blob=staged.blob
+            )
             return
         if isinstance(staged, _Update):
             self._staged[card_id] = _Update(

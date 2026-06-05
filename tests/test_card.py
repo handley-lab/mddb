@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 import yaml as pyyaml
 
@@ -41,3 +43,25 @@ def test_card_tags_returns_mutable_backing_list():
 def test_card_from_text_malformed_frontmatter_raises_valueerror():
     with pytest.raises(ValueError, match="malformed frontmatter"):
         Card.from_text("not a card")
+
+
+def test_card_blob_defaults_none():
+    assert Card(yaml={"id": "x"}).blob is None
+    assert Card.from_text("---\nid: x\n---\nbody\n").blob is None
+
+
+def test_card_copy_carries_blob():
+    card = Card(yaml={"id": "x"}, body="b", blob=Path("/deck/x.pdf"))
+    assert card.copy().blob == Path("/deck/x.pdf")
+
+
+def test_card_blob_excluded_from_equality():
+    a = Card(yaml={"id": "x"}, body="b", blob=Path("/deck-a/x.pdf"))
+    b = Card(yaml={"id": "x"}, body="b", blob=Path("/deck-b/x.pdf"))
+    assert a == b
+
+
+def test_card_str_omits_blob():
+    card = Card(yaml={"id": "x"}, body="hello\n", blob=Path("/deck/x.pdf"))
+    assert "x.pdf" not in str(card)
+    assert Card.from_text(str(card)).blob is None

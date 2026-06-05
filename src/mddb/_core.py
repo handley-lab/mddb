@@ -78,9 +78,11 @@ class MDDB:
         full card once a caller has decided which one to open.
 
         Returns:
-            A list of ``{"id": str, "title": str | None, "summary": str | None}``
-            dicts, one per card. ``title`` and ``summary`` come back as
-            ``None`` for cards missing those keys.
+            A list of ``{"id": str, "title": str | None, "summary": str | None,
+            "blob_relpath": str | None}`` dicts, one per card. ``title`` and
+            ``summary`` come back as ``None`` for cards missing those keys;
+            ``blob_relpath`` is the relpath of the card's binary blob (see
+            :attr:`Card.blob`), or ``None`` when it has none.
         """
         return _index.list_progressive(self.conn)
 
@@ -259,12 +261,21 @@ class _Editor:
             for card_id, staged in self._staged.items():
                 if isinstance(staged, _Delete):
                     _index.delete(self._db.conn, card_id)
-                elif isinstance(staged, _Create):
-                    _index.insert(self._db.conn, staged.card, staged.relpath)
+                    continue
+                blob = _index.blob_on_disk(self._db.root / staged.relpath)
+                blob_relpath = str(blob.relative_to(self._db.root)) if blob else None
+                if isinstance(staged, _Create):
+                    _index.insert(
+                        self._db.conn, staged.card, staged.relpath, blob_relpath
+                    )
                 elif isinstance(staged, _Move):
-                    _index.update_relpath(self._db.conn, card_id, staged.relpath)
+                    _index.update_paths(
+                        self._db.conn, card_id, staged.relpath, blob_relpath
+                    )
                 elif isinstance(staged, _Update):
-                    _index.update_relpath(self._db.conn, card_id, staged.relpath)
+                    _index.update_paths(
+                        self._db.conn, card_id, staged.relpath, blob_relpath
+                    )
                     _index.update_content(self._db.conn, staged.card)
                 else:
                     raise TypeError(f"unknown staged variant: {type(staged).__name__}")

@@ -27,15 +27,27 @@ class Card:
     the key, so ``card.tags`` raising is a *normal* signal, not drift.
     Callers who treat tags as optional use ``card.yaml.get("tags", [])``.
 
+    A card may have a **blob**: one binary file sharing its filename stem
+    (``floorplan.md`` + ``floorplan.png``). :attr:`blob` is the absolute path
+    to that file, or ``None``. It is populated by :meth:`MDDB.read` from disk;
+    cards built via :meth:`from_text`/:meth:`from_file` have ``blob=None``
+    (text alone has no filesystem location). The blob is a separate file, not
+    part of the markdown — :meth:`__str__` does not include it, and it is
+    excluded from equality so the same card read from two checkouts (different
+    absolute roots) compares equal.
+
     Attributes:
         yaml: Frontmatter as a Python dict. Must contain ``"id"``;
             ``"title"`` and ``"summary"`` are strongly expected; ``"tags"``
             may be absent.
         body: Markdown body text.
+        blob: Absolute path to the card's binary blob, or ``None``. Stamped
+            by :meth:`MDDB.read`; not serialised; not part of equality.
     """
 
     yaml: dict = field(default_factory=dict)
     body: str = ""
+    blob: Path | None = field(default=None, compare=False)
 
     @property
     def id(self) -> str:
@@ -65,9 +77,10 @@ class Card:
         """Return a deep copy of this card.
 
         ``yaml`` is deep-copied (nested lists/dicts are independent);
-        ``body`` is a string and shared.
+        ``body`` is a string and shared; ``blob`` is an immutable ``Path``
+        and shared.
         """
-        return Card(yaml=deepcopy(self.yaml), body=self.body)
+        return Card(yaml=deepcopy(self.yaml), body=self.body, blob=self.blob)
 
     @classmethod
     def from_file(cls, path: Path) -> Card:
@@ -94,6 +107,9 @@ class Card:
         return cls(yaml=yaml.safe_load(fm_text), body=body)
 
     def __str__(self) -> str:
-        """Serialise the card to its on-disk file form (frontmatter + body)."""
+        """Serialise the card to its on-disk ``.md`` form (frontmatter + body).
+
+        The :attr:`blob` is a separate filesystem file and is not included.
+        """
         fm = yaml.safe_dump(self.yaml, sort_keys=False, allow_unicode=True)
         return f"---\n{fm}---\n{self.body}"

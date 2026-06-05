@@ -6,6 +6,7 @@ CREATE TABLE entries(
     relpath TEXT UNIQUE NOT NULL,
     title TEXT,
     summary TEXT,
+    blob_relpath TEXT,
     yaml_text TEXT NOT NULL,
     body TEXT NOT NULL
 );

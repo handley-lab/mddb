@@ -954,7 +954,7 @@ def test_create_with_path_blob(db, tmp_path):
     source.write_bytes(b"%PDF-fake")
     with db.editor(rationale="path blob") as editor:
         card = editor.create(title="A", summary="A", relpath="papers/a.md", blob=source)
-    assert card.blob is None  # not stamped until read
+    assert card.blob is None
     assert (db.root / "papers/a.md").exists()
     assert (db.root / "papers/a.pdf").read_bytes() == b"%PDF-fake"
     again = db.read(card.id)
@@ -1065,7 +1065,6 @@ def test_read_text_card_blob_is_none(db, seed):
 
 
 def test_create_describe_existing_blob(db, seed):
-    # a binary already exists on disk; create a card to describe it (adoption)
     seed(title="Placeholder", summary="holds the dir", relpath="receipts/keep.md")
     (db.root / "receipts" / "scan.pdf").write_bytes(b"%PDF")
     db._git("add", "--", "receipts/scan.pdf")
@@ -1156,8 +1155,6 @@ def test_move_dotted_stem_blob(db):
 
 
 def test_move_leaves_longer_stem_sibling_blob(db):
-    # notes.md and notes.extra.md (a blob card); moving notes.md must not
-    # touch notes.extra.pdf (which belongs to notes.extra.md).
     with db.editor(rationale="seed two cards") as editor:
         notes = editor.create(title="Notes", summary="n", relpath="space/notes.md")
         editor.create(
@@ -1192,7 +1189,6 @@ def test_delete_leaves_longer_stem_sibling_blob(db):
 
 def test_move_blob_collision_at_target_raises_clean(db):
     card = _commit_blob_card(db, relpath="papers/a.md")
-    # a different blob already sits at the move target's stem
     (db.root / "archive").mkdir()
     (db.root / "archive" / "a.pdf").write_bytes(b"blocker")
     db._git("add", "--", "archive/a.pdf")
@@ -1200,7 +1196,6 @@ def test_move_blob_collision_at_target_raises_clean(db):
     with pytest.raises(FileExistsError):
         with db.editor(rationale="collide") as editor:
             editor.move(card.id, "archive/a.md")
-    # clean tree: nothing moved
     assert (db.root / "papers/a.md").exists()
     assert (db.root / "papers/a.pdf").exists()
     assert (db.root / "archive/a.pdf").read_bytes() == b"blocker"
@@ -1238,9 +1233,7 @@ def test_delete_then_create_blob_same_relpath(db):
         db.read(old.id)
 
 
-def test_create_with_blob_overwrite_collision_raises_clean(db):
-    # a different same-stem file already exists where a create-with-blob
-    # would land -> two-blob drift, must raise before any mutation.
+def test_create_with_blob_different_same_stem_file_raises_clean(db):
     with db.editor(rationale="seed dir") as editor:
         editor.create(title="Keep", summary="k", relpath="d/keep.md")
     (db.root / "d" / "a.png").write_bytes(b"png")
@@ -1260,7 +1253,7 @@ def test_create_with_blob_overwrite_collision_raises_clean(db):
 
 def test_move_untracked_blob_raises_clean(db, seed):
     card = seed(title="Scan", summary="s", relpath="receipts/scan.md")
-    (db.root / "receipts" / "scan.pdf").write_bytes(b"%PDF")  # NOT git added
+    (db.root / "receipts" / "scan.pdf").write_bytes(b"%PDF")
     with pytest.raises(ValueError, match="untracked"):
         with db.editor(rationale="move untracked") as editor:
             editor.move(card.id, "archive/scan.md")
@@ -1283,7 +1276,7 @@ def test_move_no_blob_card_adopts_destination_blob(db, seed):
 
 def test_delete_untracked_blob_raises_clean(db, seed):
     card = seed(title="Scan", summary="s", relpath="receipts/scan.md")
-    (db.root / "receipts" / "scan.pdf").write_bytes(b"%PDF")  # NOT git added
+    (db.root / "receipts" / "scan.pdf").write_bytes(b"%PDF")
     with pytest.raises(ValueError, match="untracked"):
         with db.editor(rationale="delete untracked") as editor:
             editor.delete(card.id)
@@ -1302,3 +1295,21 @@ def test_move_and_edit_carries_blob(db):
     assert again.blob == db.root / "archive/a.pdf"
     assert (db.root / "archive/a.pdf").read_bytes() == b"%PDF"
     assert not (db.root / "papers/a.pdf").exists()
+
+
+def test_create_with_blob_two_blob_destination_raises_valueerror(db):
+    with db.editor(rationale="seed dir") as editor:
+        editor.create(title="Keep", summary="k", relpath="d/keep.md")
+    (db.root / "d" / "a.png").write_bytes(b"png")
+    (db.root / "d" / "a.txt").write_bytes(b"txt")
+    db._git("add", "--", "d/a.png", "d/a.txt")
+    db._git("commit", "-q", "-m", "two stray same-stem files")
+    before = _git_log_count(db)
+    with pytest.raises(ValueError, match="multiple blobs"):
+        with db.editor(rationale="collide") as editor:
+            editor.create(
+                title="A", summary="A", relpath="d/a.md", blob=b"x", blob_ext=".pdf"
+            )
+    assert _git_log_count(db) == before
+    assert not (db.root / "d/a.md").exists()
+    assert not (db.root / "d/a.pdf").exists()

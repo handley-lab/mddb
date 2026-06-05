@@ -181,7 +181,7 @@ def _blob_at(card_relpath: str, ext: str) -> str:
 class _Create:
     card: Card
     relpath: str
-    blob: tuple[bytes, str] | None = None  # (bytes, normalised single-suffix ext)
+    blob: tuple[bytes, str] | None = None
 
 
 @dataclass
@@ -258,7 +258,7 @@ class _Editor:
                 raise TypeError(f"unknown staged variant: {type(staged).__name__}")
         root = self._db.root
 
-        delete_blobs: dict[str, str] = {}  # card_id -> blob relpath to remove
+        delete_blobs: dict[str, str] = {}
         deleted_paths: set[str] = set()
         for card_id, staged in self._staged.items():
             if isinstance(staged, _Delete):
@@ -301,14 +301,13 @@ class _Editor:
                     blob_moves.append((str(old.relative_to(root)), target))
             if isinstance(staged, (_Create, _Move)) or moved:
                 claim(relpath)
+            existing = _index.blob_on_disk(root / relpath, ignore=deleted_abs)
             if target is not None:
-                claim(target)
-                existing = _index.blob_on_disk(root / relpath, ignore=deleted_abs)
                 if existing is not None and str(existing.relative_to(root)) != target:
                     raise FileExistsError(target)
+                claim(target)
                 final_blob[card_id] = target
             else:
-                existing = _index.blob_on_disk(root / relpath, ignore=deleted_abs)
                 final_blob[card_id] = (
                     str(existing.relative_to(root)) if existing else None
                 )
@@ -429,7 +428,9 @@ class _Editor:
 
         Raises:
             ValueError: ``blob`` given without a derivable single-suffix ext;
-                a multi-part or ``.md`` ``blob_ext``; a blob path outside root.
+                a multi-part or ``.md`` ``blob_ext``; a destination blob
+                relpath outside the deck root. (The ``blob`` source ``Path``
+                itself may be anywhere; its bytes are read eagerly.)
         """
         if self._closed:
             raise RuntimeError("editor already closed")

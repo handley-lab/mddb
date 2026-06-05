@@ -266,3 +266,13 @@ def test_content_update_preserves_blob_relpath(db, seed):
         ed.update(fresh, summary="updated")
     after = next(x for x in db2.list() if x["id"] == card.id)
     assert after["blob_relpath"] == "receipts/scan.pdf"
+
+
+def test_read_raises_on_two_blobs(db, seed):
+    card = seed(title="Scan", summary="s", relpath="receipts/scan.md")
+    (db.root / "receipts" / "scan.pdf").write_bytes(b"a")
+    (db.root / "receipts" / "scan.png").write_bytes(b"b")
+    db._git("add", "--", "receipts/scan.pdf", "receipts/scan.png")
+    db._git("commit", "-q", "-m", "two blobs")
+    with pytest.raises(ValueError, match="multiple blobs"):
+        db.read(card.id)

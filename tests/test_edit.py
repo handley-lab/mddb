@@ -947,3 +947,172 @@ def test_editor_commit_does_not_sweep_unrelated_staged_changes(db):
     assert committed == {"a.md"}
     status = db._git("status", "--porcelain").stdout
     assert "A  unrelated.txt" in status
+
+
+def test_create_with_path_blob(db, tmp_path):
+    source = tmp_path / "src.pdf"
+    source.write_bytes(b"%PDF-fake")
+    with db.editor(rationale="path blob") as editor:
+        card = editor.create(title="A", summary="A", relpath="papers/a.md", blob=source)
+    assert card.blob is None  # not stamped until read
+    assert (db.root / "papers/a.md").exists()
+    assert (db.root / "papers/a.pdf").read_bytes() == b"%PDF-fake"
+    again = db.read(card.id)
+    assert again.blob == db.root / "papers/a.pdf"
+    assert again.blob.read_bytes() == b"%PDF-fake"
+
+
+def test_create_with_bytes_blob(db):
+    with db.editor(rationale="bytes blob") as editor:
+        card = editor.create(
+            title="A", summary="A", relpath="papers/a.md", blob=b"raw", blob_ext=".bin"
+        )
+    assert db.read(card.id).blob == db.root / "papers/a.bin"
+    assert (db.root / "papers/a.bin").read_bytes() == b"raw"
+
+
+def test_create_blob_dotted_stem(db):
+    with db.editor(rationale="dotted") as editor:
+        card = editor.create(
+            title="Return",
+            summary="r",
+            relpath="papers/2025.return.md",
+            blob=b"x",
+            blob_ext=".pdf",
+        )
+    assert db.read(card.id).blob == db.root / "papers/2025.return.pdf"
+
+
+def test_create_blob_path_no_suffix_raises(db, tmp_path):
+    source = tmp_path / "noext"
+    source.write_bytes(b"x")
+    with pytest.raises(ValueError, match="blob_ext"):
+        with db.editor(rationale="bad") as editor:
+            editor.create(title="A", summary="A", relpath="a.md", blob=source)
+
+
+def test_create_blob_path_multipart_suffix_raises(db, tmp_path):
+    source = tmp_path / "archive.tar.gz"
+    source.write_bytes(b"x")
+    with pytest.raises(ValueError, match="blob_ext"):
+        with db.editor(rationale="bad") as editor:
+            editor.create(title="A", summary="A", relpath="a.md", blob=source)
+
+
+def test_create_blob_multipart_ext_raises(db):
+    with pytest.raises(ValueError, match="single suffix"):
+        with db.editor(rationale="bad") as editor:
+            editor.create(
+                title="A", summary="A", relpath="a.md", blob=b"x", blob_ext=".tar.gz"
+            )
+
+
+def test_create_blob_md_ext_raises(db):
+    with pytest.raises(ValueError, match="cannot be .md"):
+        with db.editor(rationale="bad") as editor:
+            editor.create(
+                title="A", summary="A", relpath="a.md", blob=b"x", blob_ext=".md"
+            )
+
+
+def test_create_blob_bytes_without_ext_raises(db):
+    with pytest.raises(ValueError, match="blob_ext"):
+        with db.editor(rationale="bad") as editor:
+            editor.create(title="A", summary="A", relpath="a.md", blob=b"x")
+
+
+def test_create_blob_path_read_eagerly(db, tmp_path):
+    source = tmp_path / "src.pdf"
+    source.write_bytes(b"original")
+    with db.editor(rationale="eager") as editor:
+        card = editor.create(title="A", summary="A", relpath="a.md", blob=source)
+        source.write_bytes(b"mutated-after-create")
+    assert db.read(card.id).blob.read_bytes() == b"original"
+
+
+def test_create_then_update_preserves_blob(db):
+    with db.editor(rationale="create+update") as editor:
+        card = editor.create(
+            title="A", summary="A", relpath="a.md", blob=b"pdf", blob_ext=".pdf"
+        )
+        editor.update(card, summary="updated")
+    again = db.read(card.id)
+    assert again.summary == "updated"
+    assert again.blob == db.root / "a.pdf"
+    assert again.blob.read_bytes() == b"pdf"
+
+
+def test_create_then_move_with_blob_writes_at_new_location(db):
+    with db.editor(rationale="create+move") as editor:
+        card = editor.create(
+            title="A",
+            summary="A",
+            relpath="staging/a.md",
+            blob=b"bytes",
+            blob_ext=".pdf",
+        )
+        editor.move(card.id, "final/a.md")
+    assert not (db.root / "staging/a.md").exists()
+    assert not (db.root / "staging/a.pdf").exists()
+    assert (db.root / "final/a.md").exists()
+    assert db.read(card.id).blob == db.root / "final/a.pdf"
+    assert (db.root / "final/a.pdf").read_bytes() == b"bytes"
+
+
+def test_read_text_card_blob_is_none(db, seed):
+    card = seed(title="Plain", summary="no blob")
+    assert db.read(card.id).blob is None
+
+
+def test_create_describe_existing_blob(db, seed):
+    # a binary already exists on disk; create a card to describe it (adoption)
+    seed(title="Placeholder", summary="holds the dir", relpath="receipts/keep.md")
+    (db.root / "receipts" / "scan.pdf").write_bytes(b"%PDF")
+    db._git("add", "--", "receipts/scan.pdf")
+    db._git("commit", "-q", "-m", "drop a scan")
+    with db.editor(rationale="describe the scan") as editor:
+        card = editor.create(
+            title="Scan", summary="describes scan.pdf", relpath="receipts/scan.md"
+        )
+    assert db.read(card.id).blob == db.root / "receipts/scan.pdf"
+    entry = next(e for e in db.list() if e["id"] == card.id)
+    assert entry["blob_relpath"] == "receipts/scan.pdf"
+
+
+def test_create_blob_ext_normalises_without_dot(db):
+    with db.editor(rationale="no-dot ext") as editor:
+        card = editor.create(
+            title="A", summary="A", relpath="a.md", blob=b"x", blob_ext="pdf"
+        )
+    assert db.read(card.id).blob == db.root / "a.pdf"
+
+
+def test_create_blob_ext_overrides_path_suffix(db, tmp_path):
+    source = tmp_path / "src.pdf"
+    source.write_bytes(b"x")
+    with db.editor(rationale="override ext") as editor:
+        card = editor.create(
+            title="A", summary="A", relpath="a.md", blob=source, blob_ext=".bin"
+        )
+    assert db.read(card.id).blob == db.root / "a.bin"
+    assert not (db.root / "a.pdf").exists()
+
+
+def test_create_blob_multipart_path_with_explicit_ext(db, tmp_path):
+    source = tmp_path / "archive.tar.gz"
+    source.write_bytes(b"x")
+    with db.editor(rationale="archive") as editor:
+        card = editor.create(
+            title="A", summary="A", relpath="a.md", blob=source, blob_ext=".tgz"
+        )
+    assert db.read(card.id).blob == db.root / "a.tgz"
+
+
+def test_create_blob_commit_includes_both_files(db):
+    with db.editor(rationale="blob commit") as editor:
+        editor.create(
+            title="A", summary="A", relpath="a.md", blob=b"x", blob_ext=".pdf"
+        )
+    out = db._git("show", "--name-only", "--pretty=format:", "HEAD").stdout
+    committed = {line.strip() for line in out.splitlines() if line.strip()}
+    assert committed == {"a.md", "a.pdf"}

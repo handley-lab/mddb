@@ -61,14 +61,20 @@ class MDDB:
             card_id: The card's ``id`` (the value at ``yaml["id"]``).
 
         Returns:
-            The :class:`Card` as parsed from its current file.
+            The :class:`Card` as parsed from its current file, with
+            :attr:`Card.blob` set to the absolute path of its binary blob
+            (discovered on disk), or ``None`` when it has none.
 
         Raises:
             KeyError: No card with that ``id`` is known to the _index.
             FileNotFoundError: The index points at a path that no longer
                 exists on disk.
+            ValueError: Two same-stem blobs sit beside the card (drift).
         """
-        return Card.from_file(self.root / _index.relpath_of(self.conn, card_id))
+        relpath = _index.relpath_of(self.conn, card_id)
+        card = Card.from_file(self.root / relpath)
+        card.blob = _index.blob_on_disk(self.root / relpath)
+        return card
 
     def list(self) -> list[dict]:
         """Return every card's id, title, and summary — the progressive-disclosure summary view.
@@ -160,10 +166,22 @@ def _validate_in_root(root: Path, relpath: str) -> None:
         raise ValueError(f"relpath must be relative and canonical: {relpath}")
 
 
+def _blob_at(card_relpath: str, ext: str) -> str:
+    """Return the blob relpath for a card relpath + leading-dot extension.
+
+    ``with_suffix`` replaces only the final ``.md`` suffix, so dotted card
+    stems (``papers/2025.return.md`` -> ``papers/2025.return.pdf``) resolve
+    correctly. ``with_suffix`` raises ``ValueError`` natively if ``ext``
+    contains a path separator.
+    """
+    return str(Path(card_relpath).with_suffix(ext))
+
+
 @dataclass
 class _Create:
     card: Card
     relpath: str
+    blob: tuple[bytes, str] | None = None  # (bytes, normalised single-suffix ext)
 
 
 @dataclass
@@ -256,6 +274,17 @@ class _Editor:
                 os.replace(tmp, target)
                 self._db._git("add", "--", staged.relpath)
                 touched.add(staged.relpath)
+                if isinstance(staged, _Create) and staged.blob is not None:
+                    blob_bytes, ext = staged.blob
+                    blob_relpath = _blob_at(staged.relpath, ext)
+                    blob_target = self._db.root / blob_relpath
+                    blob_tmp = blob_target.with_suffix(
+                        blob_target.suffix + f".{uuid.uuid4().hex}.tmp"
+                    )
+                    blob_tmp.write_bytes(blob_bytes)
+                    os.replace(blob_tmp, blob_target)
+                    self._db._git("add", "--", blob_relpath)
+                    touched.add(blob_relpath)
         self._db._git("commit", "-m", self._rationale, "--", *sorted(touched))
         with self._db.conn:
             for card_id, staged in self._staged.items():
@@ -289,6 +318,8 @@ class _Editor:
         body: str = "",
         relpath: str = "",
         tags: Sequence[str] | None = None,
+        blob: Path | bytes | None = None,
+        blob_ext: str = "",
     ) -> Card:
         """Stage a new card for creation. Materialises on clean ``__exit__``.
 
@@ -304,9 +335,23 @@ class _Editor:
             - non-empty sequence: replace; ``tags=`` wins over any
               ``yaml["tags"]`` value.
 
+        ``blob`` attaches one binary file beside the card (sharing its stem).
+        A ``Path`` source is read eagerly; ``bytes`` are used directly.
+        ``blob_ext`` is the single-suffix extension (``".pdf"``); it is
+        required for ``bytes`` and overrides a ``Path``'s suffix. If omitted
+        for a ``Path`` with exactly one suffix, that suffix is used. The blob
+        file is written at materialise time; collision/adoption against
+        existing files is resolved then, not here. The returned card's
+        :attr:`Card.blob` is ``None`` (the file does not exist until commit);
+        read it back via :meth:`MDDB.read` after the editor block.
+
         Required kwargs (``title``, ``summary``) win over any matching keys
         in ``yaml=``. ``id`` from ``yaml=`` is preserved verbatim (any
         value); a UUIDv4 is generated only when ``id`` is absent.
+
+        Raises:
+            ValueError: ``blob`` given without a derivable single-suffix ext;
+                a multi-part or ``.md`` ``blob_ext``; a blob path outside root.
         """
         if self._closed:
             raise RuntimeError("editor already closed")
@@ -345,7 +390,26 @@ class _Editor:
             for s in self._staged.values()
         ):
             raise FileExistsError(resolved)
-        self._staged[new_card.id] = _Create(card=new_card, relpath=resolved)
+        staged_blob: tuple[bytes, str] | None = None
+        if blob is not None:
+            if blob_ext:
+                ext = blob_ext if blob_ext.startswith(".") else f".{blob_ext}"
+            elif isinstance(blob, Path) and len(blob.suffixes) == 1:
+                ext = blob.suffix
+            else:
+                raise ValueError(
+                    "blob requires blob_ext, or a Path with exactly one suffix"
+                )
+            if "." in ext[1:]:
+                raise ValueError(f"blob_ext must be a single suffix: {ext}")
+            if ext == ".md":
+                raise ValueError("blob_ext cannot be .md")
+            _validate_in_root(self._db.root, _blob_at(resolved, ext))
+            blob_bytes = blob.read_bytes() if isinstance(blob, Path) else bytes(blob)
+            staged_blob = (blob_bytes, ext)
+        self._staged[new_card.id] = _Create(
+            card=new_card, relpath=resolved, blob=staged_blob
+        )
         return new_card.copy()
 
     def read(self, card_id: str) -> Card:
@@ -452,7 +516,9 @@ class _Editor:
                 card=staged_card, original_relpath=original, relpath=original
             )
         elif isinstance(staged, _Create):
-            self._staged[card.id] = _Create(card=staged_card, relpath=staged.relpath)
+            self._staged[card.id] = _Create(
+                card=staged_card, relpath=staged.relpath, blob=staged.blob
+            )
         elif isinstance(staged, (_Update, _Move)):
             self._staged[card.id] = _Update(
                 card=staged_card,
@@ -525,7 +591,9 @@ class _Editor:
             )
             return
         if isinstance(staged, _Create):
-            self._staged[card_id] = _Create(card=staged.card, relpath=new_relpath)
+            self._staged[card_id] = _Create(
+                card=staged.card, relpath=new_relpath, blob=staged.blob
+            )
             return
         if isinstance(staged, _Update):
             self._staged[card_id] = _Update(

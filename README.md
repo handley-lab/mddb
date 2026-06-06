@@ -50,6 +50,22 @@ for commit in db.history(card.id):
 
 See `CLAUDE.md` for the philosophy and the SQLite schema, `src/mddb/schema.sql` for the schema itself.
 
+## MCP server (optional)
+
+For cross-process agents (Codex, Clawde), the `mddb[mcp]` extra ships a FastMCP
+server. One server serves many decks — each tool call passes the deck path.
+
+```bash
+pip install mddb[mcp]
+claude mcp add mddb -- mcp-mddb
+```
+
+Two tools: `read(deck, op=list|get|history|query|blob, ...)` and
+`editor(deck, rationale, ops)` (a JSON-array of operations applied as one
+commit). For example, `read(deck="/home/me/finance", op="list")` or
+`editor(deck="/home/me/home", rationale="...", ops='[{"op":"create",...}]')`.
+The core `import mddb` does not pull in the MCP dependency.
+
 ## Status
 
 Prototype. Single-writer. Linux only.

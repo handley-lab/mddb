@@ -4,7 +4,7 @@ Guidance for Claude Code working in this repository.
 
 `mddb` is a Python library: a minimal YAML-frontmatter + markdown-body card substrate. Cards live as `.md` files in a directory under git; a SQLite index outside the directory (at `~/.cache/mddb/`) provides fast structured + full-text queries; rationales live in commit messages. The substrate has no domain knowledge — no `card_type`, no `status`, no `due`. The **substrate filing vocabulary** is `id`, `title`, `summary`, `relpath`, and `tags` — these are how the substrate identifies and slices cards (see the "Card format", "Directories and slugs", and "Tags" sections below for each one's semantics). Anything heavier (inventories, GTD, anything else) is layer code or, more usually, Alan reasoning in his REPL.
 
-First consumer: `alan` working in a persistent Python REPL. `import mddb; db = mddb.MDDB(path)` opens an existing deck; `mddb.MDDB.init(path)` bootstraps a fresh one. There is no MCP server. There is no CLI. There is no TUI. There is no validation boundary — Alan constructs the calls.
+First consumer: `alan` working in a persistent Python REPL. `import mddb; db = mddb.MDDB(path)` opens an existing deck; `mddb.MDDB.init(path)` bootstraps a fresh one. There is no CLI. There is no TUI. There is no validation boundary on the Python API — Alan constructs the calls. An **optional** MCP server (the `mddb[mcp]` extra; see "MCP server" below) wraps the same API for cross-process agents (Codex, Clawde); the core `import mddb` never imports it.
 
 ## Philosophy
 
@@ -26,7 +26,7 @@ These rules bound this codebase. They are themselves bound by lean code — don'
 
 - **No migration code.** Pre-alpha. No backwards-compatibility shims. If the on-disk layout changes, the change is the migration: bump the schema-version row in `meta`, the next open rebuilds the index from the cards on disk, done. Don't write code to read old schemas.
 
-- **No MCP, no Pydantic, no validation theatre.** Alan is the agent constructing the calls; there is no untrusted boundary. The API takes plain Python types. Errors are plain Python exceptions. Add Pydantic and an MCP server when a real cross-process consumer needs them.
+- **No MCP, no Pydantic, no validation theatre in the core.** Alan is the agent constructing the calls; the Python API has no untrusted boundary, takes plain Python types, and raises plain Python exceptions. Cross-process agents now arrived, so an MCP server lives in the optional `mddb[mcp]` extra (`src/mddb/_mcp.py`, FastMCP + Pydantic `Field`s) — but it is a thin adapter over the same API and the core stays MCP/Pydantic-free (`import mddb` must not import either). Don't add Pydantic or validation to the core.
 
 - **Iterative reviews have a stopping rule.** When a review escalates into deeper checks for drift that requires unusual operator behaviour to trigger, stop and call convergence. "Lean code" is a bound, not a soft preference; an APPROVED that adds 300 lines is worse than a NOT APPROVED at 200.
 
@@ -44,7 +44,7 @@ These rules bound this codebase. They are themselves bound by lean code — don'
 - Core substrate has no domain fields. The substrate filing vocabulary is `id`, `title`, `summary`, `relpath`, and `tags` — structures the substrate provides; *names* (what `area/work` or `inventory` means) stay user-owned. Flat YAML.
 - Mutation order: filesystem → git → SQLite. SQLite failures propagate; the cache may be left stale. Delete the cache file manually if you want a fresh one.
 - Subprocess git via `subprocess.run(["git", ...], check=True)`. No GitPython (it's itself a subprocess wrapper — adds API cost without value). No libgit2 (gtd dropped it after fighting it). If bulk operations ever bottleneck, dulwich (pure-Python git) is the leanest alternative — not another wrapper.
-- No MCP, no CLI, no GUI in the prototype.
+- No CLI, no GUI. MCP only via the optional `mddb[mcp]` extra (the core is MCP-free).
 
 ## Architecture
 
@@ -324,6 +324,19 @@ card.yaml        # full dict
 
 `id`, `title`, `summary`, `relpath`, and `tags` are substrate filing keys (privileged at the substrate level). Any other field (e.g. `due`, `status`, `card_type`, `location`) is layer-defined and reached via raw SQL through `entry_fields`.
 
+### MCP server
+
+The optional `mddb[mcp]` extra ships `src/mddb/_mcp.py` — a FastMCP adapter (`mcp-mddb` console script) so cross-process agents (Codex, Clawde) use decks through tools rather than Python. It is a thin wrapper over the same `MDDB` API; the core stays MCP-free (`import mddb` never imports `_mcp`). `_mcp.py` is underscore-private (so it's `D`-exempt) and reached only via the console script.
+
+One stateless server serves **many** decks: every tool takes `deck` (an absolute path to an mddb root) as its first arg and opens `mddb.MDDB(deck)` per call — no env var, no module-level state. `deck` (and `blob_path`) can address any path the server process can read/write; single-tenant agent, not guarded.
+
+Two tools, mirroring mddb's two API halves (the read surface and the editor):
+
+- `read(deck, op, id="", sql="", params="[]")` — `op` ∈ `list | get | history | query | blob`. `query` runs raw read-only SQL via `_index.open_index_readonly` (a `mode=ro` connection — query SQL can't corrupt the cache; no row cap, the caller writes `LIMIT`); the read tool's description injects `_index.SCHEMA_DOC` so the agent knows the tables. `blob` returns the on-disk blob path (bytes not inlined).
+- `editor(deck, rationale, ops)` — `ops` is a JSON-array string run as ONE `db.editor()` block → one commit. Op shapes mirror `_Editor` (`create`/`update`/`delete`/`move`/`edit`); optional fields are membership-gated (no `dict.get`); `update` re-reads via `e.read` to dodge the stale-snapshot footgun. Any `id` may be `"$prev[N]"` to reference the id returned by the Nth earlier op.
+
+Returns are plain dict/list (no Pydantic response models); errors propagate natively and FastMCP wraps them as `ToolError`. No connection cleanup — per-call locals are closed by refcount, matching the core (which never closes `db.conn`).
+
 ## Style
 
 - Comments explain *why*, not *what*. Names explain *what*. If you find yourself writing a comment to explain a name, change the name instead.
@@ -345,10 +358,11 @@ card.yaml        # full dict
 
 ```toml
 dependencies = ["pyyaml>=6.0", "python-slugify>=8.0"]
-dev = ["pytest>=8.0", "ruff>=0.5", "pre-commit>=3.0", "tomli>=2.0"]
+mcp = ["mcp>=1.0.0"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5", "pre-commit>=3.0", "tomli>=2.0"]
 ```
 
-stdlib `sqlite3`, `subprocess` (for git), `pathlib`, `uuid`, `hashlib`, `os`. No GitPython, no Pydantic, no MCP SDK, no mypy, no pytest-cov. The dev extras (`pre-commit`, `tomli`) support the CI / version-check workflow under `.github/` and `.pre-commit-config.yaml`.
+stdlib `sqlite3`, `subprocess` (for git), `pathlib`, `uuid`, `hashlib`, `os`. The core runtime deps stay `pyyaml` + `python-slugify` only — no GitPython, no Pydantic, no MCP SDK, no mypy, no pytest-cov. The MCP SDK (`mcp`) lives in the optional `mddb[mcp]` extra, never the core; `pytest-asyncio` is in the `dev` extra. The dev extras (`pre-commit`, `tomli`) support the CI / version-check workflow under `.github/` and `.pre-commit-config.yaml`.
 
 ## Tests
 

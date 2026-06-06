@@ -7,6 +7,7 @@ arch=('any')
 url='https://github.com/handley-lab/mddb'
 license=('MIT')
 depends=('python' 'python-yaml' 'python-slugify' 'git')
+optdepends=('python-mcp: MCP server (mcp-mddb) for cross-process agents')
 
 package() {
   cd "$startdir"
@@ -17,6 +18,10 @@ package() {
   install -Dm644 src/mddb/_core.py    "$pkgdir/$purelib/mddb/_core.py"
   install -Dm644 src/mddb/_index.py   "$pkgdir/$purelib/mddb/_index.py"
   install -Dm644 src/mddb/card.py     "$pkgdir/$purelib/mddb/card.py"
+  install -Dm644 src/mddb/_mcp.py     "$pkgdir/$purelib/mddb/_mcp.py"
   install -Dm644 src/mddb/schema.sql  "$pkgdir/$purelib/mddb/schema.sql"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -dm755 "$pkgdir/usr/bin"
+  printf '#!/usr/bin/env python\nfrom mddb._mcp import mcp\nmcp.run()\n' > "$pkgdir/usr/bin/mcp-mddb"
+  chmod 755 "$pkgdir/usr/bin/mcp-mddb"
 }

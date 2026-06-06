@@ -14,6 +14,35 @@ from .card import Card
 SCHEMA_VERSION = "3"
 _SCHEMA = (Path(__file__).parent / "schema.sql").read_text()
 
+SCHEMA_DOC = """\
+entries(rowid, id, relpath, title, summary, blob_relpath, yaml_text, body)
+  one row per card. id/relpath UNIQUE NOT NULL; title/summary/blob_relpath nullable.
+  yaml_text is the serialised frontmatter; body is the markdown body.
+entry_fields(entry_rowid -> entries.rowid, key, value_str, value_num)
+  one row per top-level scalar (and per item of a list-of-scalars) in a card's
+  yaml, EXCEPT title/summary (those are columns on entries). Numeric values also
+  land in value_num. This is where tags live (key='tags', one row per tag).
+entries_fts(yaml_text, body)
+  FTS5 full-text index over entries; query as:
+  SELECT id FROM entries WHERE rowid IN
+    (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ?)"""
+
+
+def open_index_readonly(root: Path) -> sqlite3.Connection:
+    """Open the cache at ``root`` read-only (``mode=ro``) for raw SQL queries.
+
+    ``mode=ro`` is what stops query SQL from writing the cache file. Open the
+    deck (:func:`open_index`) first so the cache exists and is current — this
+    opener does not rebuild.
+
+    Args:
+        root: Absolute path to the mddb directory.
+
+    Returns:
+        A read-only ``sqlite3.Connection``.
+    """
+    return sqlite3.connect(f"file:{cache_path(root)}?mode=ro", uri=True)
+
 
 def cache_path(root: Path) -> Path:
     """Return the SQLite cache path for the mddb at ``root``.

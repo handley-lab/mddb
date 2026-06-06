@@ -1,0 +1,216 @@
+import json
+import os
+import tempfile
+
+import pytest
+
+pytest.importorskip("mcp")
+
+from mcp.server.fastmcp.exceptions import ToolError  # noqa: E402
+
+from mddb._mcp import mcp  # noqa: E402
+
+
+def _result(content):
+    assert len(content) == 1
+    return json.loads(content[0].text)
+
+
+async def _edit(deck, rationale, ops):
+    return _result(
+        await mcp.call_tool(
+            "editor", {"deck": deck, "rationale": rationale, "ops": json.dumps(ops)}
+        )
+    )
+
+
+def _commit_count(db):
+    return db._git("rev-list", "--count", "HEAD").stdout.strip()
+
+
+async def test_create_returns_id_and_persists(db):
+    out = await _edit(
+        str(db.root),
+        "add card",
+        [{"op": "create", "title": "Shed", "summary": "store", "body": "x\n"}],
+    )
+    cid = out["results"][0]["id"]
+    assert db.read(cid).body == "x\n"
+
+
+async def test_batch_is_one_commit(db):
+    ops = [
+        {"op": "create", "title": "Shed", "summary": "store", "body": "foo\n"},
+        {"op": "update", "id": "$prev[0]", "summary": "store it"},
+        {"op": "edit", "id": "$prev[0]", "old": "foo", "new": "bar"},
+        {"op": "move", "id": "$prev[0]", "new_relpath": "inventory/shed.md"},
+    ]
+    out = await _edit(str(db.root), "build shed", ops)
+    cid = out["results"][0]["id"]
+    assert _commit_count(db) == "2"
+    assert len(db.history(cid)) == 1
+    assert db.read(cid).body == "bar\n"
+    assert (db.root / "inventory" / "shed.md").exists()
+
+
+async def test_body_phase_rollback(db):
+    with pytest.raises(ToolError):
+        await _edit(
+            str(db.root),
+            "half batch",
+            [
+                {"op": "create", "title": "Shed", "summary": "store"},
+                {"op": "frobnicate"},
+            ],
+        )
+    assert _commit_count(db) == "1"
+    assert db.list() == []
+    assert list(db.root.rglob("*.md")) == []
+
+
+async def test_update_requires_summary(db):
+    with pytest.raises(ToolError):
+        await _edit(
+            str(db.root),
+            "no summary",
+            [
+                {"op": "create", "title": "Shed", "summary": "store"},
+                {"op": "update", "id": "$prev[0]"},
+            ],
+        )
+
+
+async def test_update_yaml_shallow_merge(db):
+    out = await _edit(
+        str(db.root),
+        "merge yaml",
+        [
+            {
+                "op": "create",
+                "title": "Shed",
+                "summary": "store",
+                "yaml": {"area": "garden"},
+            },
+            {
+                "op": "update",
+                "id": "$prev[0]",
+                "summary": "store",
+                "yaml": {"status": "open"},
+            },
+        ],
+    )
+    card = db.read(out["results"][0]["id"])
+    assert card.yaml["area"] == "garden"
+    assert card.yaml["status"] == "open"
+
+
+async def test_update_body_replace(db):
+    out = await _edit(
+        str(db.root),
+        "replace body",
+        [
+            {"op": "create", "title": "Shed", "summary": "store", "body": "old\n"},
+            {"op": "update", "id": "$prev[0]", "summary": "store", "body": "new\n"},
+        ],
+    )
+    assert db.read(out["results"][0]["id"]).body == "new\n"
+
+
+async def test_edit_then_update_preserves_edit(db, seed):
+    card = seed(title="Shed", summary="store", body="foo\n")
+    await _edit(
+        str(db.root),
+        "edit then update",
+        [
+            {"op": "edit", "id": card.id, "old": "foo", "new": "bar"},
+            {"op": "update", "id": card.id, "summary": "store"},
+        ],
+    )
+    assert db.read(card.id).body == "bar\n"
+
+
+async def test_prev_out_of_range_rolls_back(db):
+    with pytest.raises(ToolError):
+        await _edit(
+            str(db.root),
+            "bad prev",
+            [
+                {"op": "create", "title": "Shed", "summary": "store"},
+                {"op": "move", "id": "$prev[5]", "new_relpath": "x.md"},
+            ],
+        )
+    assert _commit_count(db) == "1"
+
+
+async def test_commit_failure_surfaces_native_error(tmp_path):
+    not_a_repo = tmp_path / "notgit"
+    not_a_repo.mkdir()
+    with pytest.raises(ToolError) as exc:
+        await _edit(
+            str(not_a_repo),
+            "x",
+            [{"op": "create", "title": "A", "summary": "a"}],
+        )
+    message = str(exc.value)
+    assert "git" in message.lower()
+    assert "TypeError" not in message
+
+
+async def test_create_with_blob_path(db):
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        f.write(b"PNGBYTES")
+        src = f.name
+    try:
+        out = await _edit(
+            str(db.root),
+            "add blob card",
+            [{"op": "create", "title": "Plan", "summary": "floor", "blob_path": src}],
+        )
+    finally:
+        os.unlink(src)
+    card = db.read(out["results"][0]["id"])
+    assert card.blob.read_bytes() == b"PNGBYTES"
+    assert card.blob.name == "plan.png"
+
+
+async def test_create_blob_ext_override(db):
+    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
+        f.write(b"DATA")
+        src = f.name
+    try:
+        out = await _edit(
+            str(db.root),
+            "add blob card",
+            [
+                {
+                    "op": "create",
+                    "title": "Doc",
+                    "summary": "s",
+                    "blob_path": src,
+                    "blob_ext": ".pdf",
+                }
+            ],
+        )
+    finally:
+        os.unlink(src)
+    got = _result(
+        await mcp.call_tool(
+            "read", {"deck": str(db.root), "op": "get", "id": out["results"][0]["id"]}
+        )
+    )
+    assert got["blob_relpath"] == "doc.pdf"
+
+
+async def test_prev_collapsed_create_rolls_back(db):
+    with pytest.raises(ToolError):
+        await _edit(
+            str(db.root),
+            "collapse",
+            [
+                {"op": "create", "title": "Shed", "summary": "store"},
+                {"op": "delete", "id": "$prev[0]"},
+                {"op": "move", "id": "$prev[0]", "new_relpath": "x.md"},
+            ],
+        )
+    assert _commit_count(db) == "1"
+    assert db.list() == []

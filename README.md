@@ -64,7 +64,9 @@ Two tools: `read(deck, op=list|get|history|query|blob, ...)` and
 `editor(deck, rationale, ops)` (a JSON-array of operations applied as one
 commit). For example, `read(deck="/home/me/finance", op="list")` or
 `editor(deck="/home/me/home", rationale="...", ops='[{"op":"create",...}]')`.
-The core `import mddb` does not pull in the MCP dependency.
+A non-existent/non-deck path errors clearly rather than reading empty; bootstrap
+a new deck with `editor(deck, rationale, ops='[{"op":"init"}]')`. The core
+`import mddb` does not pull in the MCP dependency.
 
 ## Status
 

@@ -53,6 +53,11 @@ async def test_read_unknown_op_raises(db):
         await mcp.call_tool("read", {"deck": str(db.root), "op": "frobnicate"})
 
 
+async def test_read_non_deck_path_raises(tmp_path):
+    with pytest.raises(ToolError):
+        await mcp.call_tool("read", {"deck": str(tmp_path / "nope"), "op": "list"})
+
+
 async def test_multi_deck_isolation(tmp_path):
     finance = mddb.MDDB.init(tmp_path / "finance")
     home = mddb.MDDB.init(tmp_path / "home")

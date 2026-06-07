@@ -34,15 +34,22 @@ _READ_DESCRIPTION = f"""Read from an mddb deck. Dispatches on `op`:
 - `blob` (needs `id`): {{path}} — the absolute on-disk path of the card's binary
   blob (bytes are not inlined); errors if the card has no blob.
 
-`deck` is the absolute path to the mddb root. `deck` and blob paths are
-server-local: any path the server process can read/write."""
+`deck` is the absolute path to an existing mddb root (bootstrap one with the
+editor tool's `init` op); a non-deck path errors rather than reading empty.
+`deck` and blob paths are server-local: any path the server process can
+read/write."""
 
-_EDITOR_DESCRIPTION = """Apply a batch of edits to an mddb deck. `ops` is a
-JSON-array string of operations; the whole batch runs in one editor block and
-lands as ONE git commit (message = `rationale`) on success. An error while
-building the batch rolls it back with no disk change; a failure during the
-commit itself propagates and may leave the working tree/cache dirty. There is
-no batch-size cap. Operations (dispatched on `op`):
+_EDITOR_DESCRIPTION = """Apply operations to an mddb deck. `ops` is a JSON-array
+string. Two modes:
+
+- Bootstrap: `ops=[{"op":"init"}]` (the sole op) creates a new empty deck at
+  `deck` via MDDB.init, which makes its own bootstrap commit — `rationale` is
+  ignored. Use this once before editing; the deck must not already exist.
+- Edit: any other batch requires an EXISTING deck (a non-deck path errors) and
+  runs in one editor block, landing as ONE git commit (message = `rationale`) on
+  success. An error while building the batch rolls it back with no disk change; a
+  failure during the commit itself propagates and may leave the working tree/cache
+  dirty. There is no batch-size cap. Edit operations (dispatched on `op`):
 
 - {"op":"create","title","summary","body"?,"relpath"?,"tags"?,"yaml"?,"blob_path"?,"blob_ext"?}
 - {"op":"update","id","summary","tags"?,"body"?,"yaml"?}   (yaml is shallow-merged)
@@ -64,6 +71,14 @@ def _resolve_prev(value, results):
     return results[int(match.group(1))]["id"]
 
 
+def _open(deck):
+    if not (Path(deck) / ".git").is_dir():
+        raise ValueError(
+            f"not an mddb deck: {deck} (no git repo; create it with op=init)"
+        )
+    return mddb.MDDB(deck)
+
+
 @mcp.tool(description=_READ_DESCRIPTION)
 def read(
     deck: str = Field(..., description="Absolute path to the mddb deck root."),
@@ -74,7 +89,7 @@ def read(
         "[]", description="JSON array of positional SQL params for query."
     ),
 ):
-    db = mddb.MDDB(deck)
+    db = _open(deck)
     if op == "list":
         return db.list()
     if op == "get":
@@ -106,13 +121,19 @@ def read(
 @mcp.tool(description=_EDITOR_DESCRIPTION)
 def editor(
     deck: str = Field(..., description="Absolute path to the mddb deck root."),
-    rationale: str = Field(..., description="Commit message for the whole batch."),
+    rationale: str = Field(
+        ..., description="Commit message for the batch (ignored for op=init)."
+    ),
     ops: str = Field(..., description="JSON array of operation objects."),
 ):
-    db = mddb.MDDB(deck)
+    parsed = json.loads(ops)
+    if len(parsed) == 1 and parsed[0]["op"] == "init":
+        mddb.MDDB.init(deck)
+        return {"results": [{"op": "init", "deck": deck}]}
+    db = _open(deck)
     results = []
     with db.editor(rationale=rationale) as e:
-        for op in json.loads(ops):
+        for op in parsed:
             kind = op["op"]
             if kind == "create":
                 kwargs = {

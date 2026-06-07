@@ -142,18 +142,33 @@ async def test_prev_out_of_range_rolls_back(db):
     assert _commit_count(db) == "1"
 
 
-async def test_commit_failure_surfaces_native_error(tmp_path):
-    not_a_repo = tmp_path / "notgit"
-    not_a_repo.mkdir()
+async def test_non_deck_path_errors_without_writing(tmp_path):
+    not_a_deck = tmp_path / "notgit"
+    not_a_deck.mkdir()
     with pytest.raises(ToolError) as exc:
         await _edit(
-            str(not_a_repo),
+            str(not_a_deck),
             "x",
             [{"op": "create", "title": "A", "summary": "a"}],
         )
-    message = str(exc.value)
-    assert "git" in message.lower()
-    assert "TypeError" not in message
+    assert "deck" in str(exc.value).lower()
+    assert list(not_a_deck.iterdir()) == []
+
+
+async def test_init_creates_deck(tmp_path):
+    new_deck = str(tmp_path / "fresh")
+    out = await _edit(new_deck, "ignored for init", [{"op": "init"}])
+    assert out["results"][0]["op"] == "init"
+    assert (tmp_path / "fresh" / ".git").is_dir()
+    created = await _edit(
+        new_deck, "first card", [{"op": "create", "title": "A", "summary": "a"}]
+    )
+    got = _result(
+        await mcp.call_tool(
+            "read", {"deck": new_deck, "op": "get", "id": created["results"][0]["id"]}
+        )
+    )
+    assert got["yaml"]["title"] == "A"
 
 
 async def test_create_with_blob_path(db):

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
 import yaml
@@ -55,16 +57,48 @@ def cache_path(root: Path) -> Path:
     return base / "mddb" / digest / "index.sqlite"
 
 
-def open_index(root: Path) -> sqlite3.Connection:
-    """Open the cache for ``root`` or rebuild it from disk if the schema version mismatches.
+@contextmanager
+def deck_lock(root: Path):
+    """Serialise mddb writers (and stale-cache rebuilds) for the deck at ``root``.
 
-    The version-match fast path returns immediately; any other state (missing
-    cache, schema mismatch, missing ``meta.schema_version`` row) falls through
-    to :func:`rebuild_index`. Other SQLite errors (corruption, unreadable
-    file) propagate.
+    An advisory ``fcntl.flock`` on ``<root>/.git/mddb.lock`` — held across a
+    commit's materialise and across a rebuild-on-mismatch. Only mddb processes
+    take it, so it never collides with git's own ``index.lock``; the OS releases
+    it on process death.
+    """
+    with open(root / ".git" / "mddb.lock", "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+
+def git_head(conn: sqlite3.Connection) -> str:
+    """Return the git HEAD the cache reflects (``meta.git_head``), or ``""`` if unset."""
+    row = conn.execute("SELECT value FROM meta WHERE key='git_head'").fetchone()
+    return row[0] if row else ""
+
+
+def set_git_head(conn: sqlite3.Connection, sha: str) -> None:
+    """Record the git HEAD the cache now reflects. Caller wraps in ``with conn:``."""
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES ('git_head', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (sha,),
+    )
+
+
+def open_index(root: Path, head: str = "") -> sqlite3.Connection:
+    """Open the cache for ``root``, rebuilding it if the schema version or git HEAD drifted.
+
+    The fast path returns immediately when the schema version matches and the
+    cache already reflects ``head``. A schema mismatch (or missing cache) falls
+    through to :func:`rebuild_index`. A git-HEAD mismatch (``meta.git_head !=
+    head``) rebuilds too, but under :func:`deck_lock` with a recheck so a reader
+    never unlinks the shared cache while a writer is mid-sync. ``head == ""``
+    (no commits yet, e.g. during :meth:`MDDB.init`) skips the HEAD check.
 
     Args:
         root: Absolute path to the mddb directory.
+        head: The current git HEAD sha, or ``""`` when HEAD does not resolve.
 
     Returns:
         A live ``sqlite3.Connection`` with foreign keys enabled.
@@ -77,10 +111,27 @@ def open_index(root: Path) -> sqlite3.Connection:
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()
         if row and row[0] == SCHEMA_VERSION:
-            return conn
+            if not head or git_head(conn) == head:
+                return conn
+            conn.close()
+            with deck_lock(root):
+                conn = sqlite3.connect(db_path)
+                conn.execute("PRAGMA foreign_keys=ON")
+                if git_head(conn) == head:
+                    return conn
+                conn.close()
+                return _rebuild_at(root, head)
         conn.close()
         db_path.unlink()
-    return rebuild_index(root)
+    return _rebuild_at(root, head)
+
+
+def _rebuild_at(root: Path, head: str) -> sqlite3.Connection:
+    conn = rebuild_index(root)
+    if head:
+        with conn:
+            set_git_head(conn, head)
+    return conn
 
 
 def rebuild_index(root: Path) -> sqlite3.Connection:

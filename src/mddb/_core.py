@@ -15,6 +15,10 @@ from . import _index
 from .card import Card
 
 
+class ConflictError(RuntimeError):
+    """An editor's base commit no longer matches the deck's HEAD — another writer committed first."""
+
+
 class MDDB:
     """A YAML+markdown card substrate over a git directory + SQLite cache.
 
@@ -30,7 +34,7 @@ class MDDB:
     def __init__(self, path: Path | str):
         """Open the mddb at ``path``. Use :meth:`init` to bootstrap a fresh one."""
         self.root = Path(path).expanduser().resolve()
-        self.conn = _index.open_index(self.root)
+        self.conn = _index.open_index(self.root, self._head_or_empty())
         self._active_editor: _Editor | None = None
 
     @classmethod
@@ -47,6 +51,8 @@ class MDDB:
         (root / ".gitignore").write_text("*.tmp\n")
         db._git("add", "--", ".gitignore")
         db._git("commit", "-q", "-m", "initial commit")
+        with db.conn:
+            _index.set_git_head(db.conn, db.head())
         return db
 
     def read(self, card_id: str) -> Card:
@@ -133,14 +139,32 @@ class MDDB:
             )
         return commits
 
-    def editor(self, *, rationale: str) -> _Editor:
+    def editor(self, *, rationale: str, base: str = "") -> _Editor:
         """Open a context manager for a batch of mutations.
 
         The returned object's ``create``/``read``/``update``/``delete``/``move``/``edit``
         methods are buffered until the ``with`` block exits cleanly, then
         materialised as one git commit + one SQLite transaction.
+
+        ``base`` is the deck HEAD the staged changes are based on. ``""`` (the
+        default) captures the deck HEAD when the ``with`` block opens, so a
+        commit by another writer *during* the block is caught. Pass an explicit
+        sha (e.g. from an earlier :meth:`head`, taken when you read the data) to
+        also guard a read→write span that opened before the block. If the deck's
+        HEAD has moved off ``base`` when the block commits, materialisation
+        raises :class:`ConflictError` before any change is written.
         """
-        return _Editor(self, rationale)
+        return _Editor(self, rationale, base)
+
+    def head(self) -> str:
+        """Return the current branch HEAD sha (a base token for :meth:`editor`)."""
+        return self._git("rev-parse", "HEAD").stdout.strip()
+
+    def _head_or_empty(self) -> str:
+        r = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.root, capture_output=True, text=True
+        )
+        return r.stdout.strip() if r.returncode == 0 else ""
 
     def _git(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -206,9 +230,10 @@ class _Editor:
     and re-entry both raise ``RuntimeError``.
     """
 
-    def __init__(self, db: MDDB, rationale: str):
+    def __init__(self, db: MDDB, rationale: str, base: str = ""):
         self._db = db
         self._rationale = rationale
+        self._base = base
         self._staged: dict[str, _Staged] = {}
         self._closed = False
 
@@ -217,6 +242,8 @@ class _Editor:
             raise RuntimeError("editor already closed")
         if self._db._active_editor is not None:
             raise RuntimeError("nested editors are not supported")
+        if not self._base:
+            self._base = self._db._head_or_empty()
         self._db._active_editor = self
         return self
 
@@ -229,6 +256,23 @@ class _Editor:
             self._closed = True
 
     def _materialise(self) -> None:
+        """Serialise on the deck lock, verify the base, then commit the batch.
+
+        Holding :func:`_index.deck_lock` makes the base check + commit atomic
+        against other mddb writers. ``base`` is the editor's explicit ``base`` or
+        — by default — the deck HEAD captured at ``__enter__``; if it no longer
+        equals the deck's current HEAD, another writer committed first and we
+        raise :class:`ConflictError` before any mutation, leaving the tree clean.
+        """
+        with _index.deck_lock(self._db.root):
+            if self._base != self._db._head_or_empty():
+                raise ConflictError(
+                    f"deck HEAD moved off base {self._base[:8] or '(none)'}; "
+                    "re-read and retry"
+                )
+            self._commit()
+
+    def _commit(self) -> None:
         """Apply the staged batch as one git commit + one SQLite transaction.
 
         The batch is planned and fully checked before any filesystem/git
@@ -374,6 +418,7 @@ class _Editor:
                     _index.update_content(self._db.conn, staged.card)
                 else:
                     raise TypeError(f"unknown staged variant: {type(staged).__name__}")
+            _index.set_git_head(self._db.conn, self._db.head())
 
     def create(
         self,

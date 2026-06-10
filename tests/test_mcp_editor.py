@@ -24,6 +24,40 @@ async def _edit(deck, rationale, ops):
     )
 
 
+async def test_editor_stale_base_conflicts(db, seed):
+    seed(title="Seed", summary="s")
+    stale = db.head()
+    seed(title="Other", summary="moves HEAD")
+    with pytest.raises(ToolError):
+        await mcp.call_tool(
+            "editor",
+            {
+                "deck": str(db.root),
+                "rationale": "x",
+                "ops": json.dumps([{"op": "create", "title": "A", "summary": "a"}]),
+                "base": stale,
+            },
+        )
+
+
+async def test_editor_threaded_base_commits(db, seed):
+    seed(title="Seed", summary="s")
+    content = await mcp.call_tool("read", {"deck": str(db.root), "op": "list"})
+    base = json.loads(content[0].text)["base"]
+    out = _result(
+        await mcp.call_tool(
+            "editor",
+            {
+                "deck": str(db.root),
+                "rationale": "fresh base",
+                "ops": json.dumps([{"op": "create", "title": "A", "summary": "a"}]),
+                "base": base,
+            },
+        )
+    )
+    assert out["results"][0]["op"] == "create"
+
+
 def _commit_count(db):
     return db._git("rev-list", "--count", "HEAD").stdout.strip()
 
@@ -167,7 +201,7 @@ async def test_init_creates_deck(tmp_path):
         await mcp.call_tool(
             "read", {"deck": new_deck, "op": "get", "id": created["results"][0]["id"]}
         )
-    )
+    )["result"]
     assert got["yaml"]["title"] == "A"
 
 
@@ -212,7 +246,7 @@ async def test_create_blob_ext_override(db):
         await mcp.call_tool(
             "read", {"deck": str(db.root), "op": "get", "id": out["results"][0]["id"]}
         )
-    )
+    )["result"]
     assert got["blob_relpath"] == "doc.pdf"
 
 

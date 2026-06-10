@@ -10,18 +10,14 @@ import mddb  # noqa: E402
 from mddb._mcp import mcp  # noqa: E402
 
 
-def _objs(content):
-    return [json.loads(block.text) for block in content]
-
-
-def _one(content):
+def _read(content):
     assert len(content) == 1
-    return json.loads(content[0].text)
+    return json.loads(content[0].text)["result"]
 
 
 async def test_read_list(db, seed):
     card = seed(title="Wheelbarrow", summary="garden tool", body="in the shed\n")
-    rows = _objs(await mcp.call_tool("read", {"deck": str(db.root), "op": "list"}))
+    rows = _read(await mcp.call_tool("read", {"deck": str(db.root), "op": "list"}))
     assert [r["id"] for r in rows] == [card.id]
     assert rows[0]["title"] == "Wheelbarrow"
     assert rows[0]["blob_relpath"] is None
@@ -29,7 +25,7 @@ async def test_read_list(db, seed):
 
 async def test_read_get(db, seed):
     card = seed(title="Wheelbarrow", summary="garden tool", body="in the shed\n")
-    got = _one(
+    got = _read(
         await mcp.call_tool("read", {"deck": str(db.root), "op": "get", "id": card.id})
     )
     assert got["id"] == card.id
@@ -40,12 +36,19 @@ async def test_read_get(db, seed):
 
 async def test_read_history_message_is_rationale(db, seed):
     card = seed(title="Shed", summary="store", rationale="built the shed today")
-    commits = _objs(
+    commits = _read(
         await mcp.call_tool(
             "read", {"deck": str(db.root), "op": "history", "id": card.id}
         )
     )
     assert commits[0]["message"].strip() == "built the shed today"
+
+
+async def test_read_returns_base(db, seed):
+    seed(title="A", summary="a")
+    content = await mcp.call_tool("read", {"deck": str(db.root), "op": "list"})
+    base = json.loads(content[0].text)["base"]
+    assert base == mddb._index.git_head(db.conn) == db.head()
 
 
 async def test_read_unknown_op_raises(db):
@@ -66,17 +69,17 @@ async def test_multi_deck_isolation(tmp_path):
     with home.editor(rationale="seed home") as e:
         h_card = e.create(title="Boiler", summary="service due")
 
-    f_rows = _objs(
+    f_rows = _read(
         await mcp.call_tool("read", {"deck": str(finance.root), "op": "list"})
     )
-    h_rows = _objs(await mcp.call_tool("read", {"deck": str(home.root), "op": "list"}))
+    h_rows = _read(await mcp.call_tool("read", {"deck": str(home.root), "op": "list"}))
     assert [r["id"] for r in f_rows] == [f_card.id]
     assert [r["id"] for r in h_rows] == [h_card.id]
 
 
 async def test_query_matches_list(db, seed):
     card = seed(title="Wheelbarrow", summary="garden tool")
-    result = _one(
+    result = _read(
         await mcp.call_tool(
             "read",
             {
@@ -93,7 +96,7 @@ async def test_query_matches_list(db, seed):
 async def test_query_fts_with_params(db, seed):
     card = seed(title="Shed", summary="store", body="the wheelbarrow lives here\n")
     seed(title="Boiler", summary="heating", body="hot water\n")
-    result = _one(
+    result = _read(
         await mcp.call_tool(
             "read",
             {
@@ -110,7 +113,7 @@ async def test_query_fts_with_params(db, seed):
 
 async def test_query_default_params(db, seed):
     seed(title="A", summary="a")
-    result = _one(
+    result = _read(
         await mcp.call_tool(
             "read",
             {
@@ -140,7 +143,7 @@ async def test_query_sees_committed_write(db, seed):
     seed(title="First", summary="one")
     with db.editor(rationale="add second") as e:
         e.create(title="Second", summary="two")
-    result = _one(
+    result = _read(
         await mcp.call_tool(
             "read",
             {
@@ -158,13 +161,13 @@ async def test_blob_returns_path_and_bytes(db):
         card = e.create(
             title="Floorplan", summary="kitchen", blob=b"PNGDATA", blob_ext=".png"
         )
-    result = _one(
+    result = _read(
         await mcp.call_tool("read", {"deck": str(db.root), "op": "blob", "id": card.id})
     )
     from pathlib import Path
 
     assert Path(result["path"]).read_bytes() == b"PNGDATA"
-    got = _one(
+    got = _read(
         await mcp.call_tool("read", {"deck": str(db.root), "op": "get", "id": card.id})
     )
     assert got["blob_relpath"] == "floorplan.png"

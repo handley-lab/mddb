@@ -34,6 +34,11 @@ _READ_DESCRIPTION = f"""Read from an mddb deck. Dispatches on `op`:
 - `blob` (needs `id`): {{path}} — the absolute on-disk path of the card's binary
   blob (bytes are not inlined); errors if the card has no blob.
 
+Every response is {{"base": <sha>, "result": <the op payload above>}}, where
+`base` is the commit the returned data reflects. To edit conflict-safely, pass
+that `base` to the `editor` tool — if another agent committed since you read, the
+edit raises (re-read and retry).
+
 `deck` is the absolute path to an existing mddb root (bootstrap one with the
 editor tool's `init` op); a non-deck path errors rather than reading empty.
 `deck` and blob paths are server-local: any path the server process can
@@ -59,7 +64,12 @@ string. Two modes:
 
 Any `id` field may be "$prev[N]" to reference the id returned by the Nth earlier
 op in this batch (0-indexed) — e.g. create a card then move it. Returns
-{"results": [{op, id, ...}]} with the (possibly auto-generated) id per op."""
+{"results": [{op, id, ...}]} with the (possibly auto-generated) id per op.
+
+Pass `base` = the `base` field from the `read` whose data you are editing. If
+another agent committed since that read, the batch raises a conflict (nothing is
+written) — re-read to get a fresh `base` and retry. Omitting `base` only guards
+against a commit landing during this single call, not since an earlier read."""
 
 _PREV = re.compile(r"^\$prev\[(\d+)\]$")
 
@@ -90,6 +100,11 @@ def read(
     ),
 ):
     db = _open(deck)
+    base = mddb._index.git_head(db.conn)
+    return {"base": base, "result": _read_result(db, op, id, sql, params)}
+
+
+def _read_result(db, op, id, sql, params):
     if op == "list":
         return db.list()
     if op == "get":
@@ -125,6 +140,9 @@ def editor(
         ..., description="Commit message for the batch (ignored for op=init)."
     ),
     ops: str = Field(..., description="JSON array of operation objects."),
+    base: str = Field(
+        "", description="The `base` from the read whose data you are editing."
+    ),
 ):
     parsed = json.loads(ops)
     if len(parsed) == 1 and parsed[0]["op"] == "init":
@@ -132,7 +150,7 @@ def editor(
         return {"results": [{"op": "init", "deck": deck}]}
     db = _open(deck)
     results = []
-    with db.editor(rationale=rationale) as e:
+    with db.editor(rationale=rationale, base=base) as e:
         for op in parsed:
             kind = op["op"]
             if kind == "create":

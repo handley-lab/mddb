@@ -42,7 +42,7 @@ These rules bound this codebase. They are themselves bound by lean code — don'
 
 - Files are truth; SQLite is a derived cache at `~/.cache/mddb/<sha1(abs-path)>/index.sqlite`; git records rationale/history.
 - Core substrate has no domain fields. The substrate filing vocabulary is `id`, `title`, `summary`, `relpath`, and `tags` — structures the substrate provides; *names* (what `area/work` or `inventory` means) stay user-owned. Flat YAML.
-- Mutation order: filesystem → git → SQLite. SQLite failures propagate; the cache may be left stale. Delete the cache file manually if you want a fresh one.
+- Mutation order: filesystem → git → SQLite. SQLite failures propagate; if git advanced before the cache sync, the cache is left stale until the next `MDDB(path)`, which detects `meta.git_head != HEAD` and rebuilds the disposable cache (self-heal — manual deletion is no longer the normal recovery path).
 - Subprocess git via `subprocess.run(["git", ...], check=True)`. No GitPython (it's itself a subprocess wrapper — adds API cost without value). No libgit2 (gtd dropped it after fighting it). If bulk operations ever bottleneck, dulwich (pure-Python git) is the leanest alternative — not another wrapper.
 - No CLI, no GUI. MCP only via the optional `mddb[mcp]` extra (the core is MCP-free).
 
@@ -70,8 +70,11 @@ class MDDB:
     def read(self, card_id: str) -> Card: ...  # stamps Card.blob from disk
     def list(self) -> list[dict]: ...  # [{id, title, summary, blob_relpath}, ...] — progressive disclosure
     def history(self, card_id: str) -> list[dict]: ...
-    def editor(self, *, rationale: str) -> _Editor: ...
+    def head(self) -> str: ...  # current HEAD sha — a base token for editor()
+    def editor(self, *, rationale: str, base: str = "") -> _Editor: ...  # base="" -> HEAD at __enter__
     conn: sqlite3.Connection  # exposed; write SQL against the schema below
+
+class ConflictError(RuntimeError): ...  # editor base != deck HEAD at commit
 
 class _Editor:  # private; only reachable via the with-block from MDDB.editor
     def create(self, *, title: str, summary: str, yaml: dict | None = None,
@@ -100,7 +103,7 @@ class Card:
     def tags(self) -> list: return self.yaml["tags"]  # raises if absent (normal for untagged cards)
 ```
 
-`MDDB(path)` opens the mddb at `path`; mutation operations fire native `subprocess.CalledProcessError` from git if there's no repo there. `MDDB.init(path)` bootstraps a fresh one (`mkdir -p`, `git init`, commits a `.gitignore` containing `*.tmp`). Two explicit entry points — no silent "create if missing." `Card` is composition, not a dict subclass: callers write `card.yaml["key"] = value` and `card.body = "..."`. Equality, pickling, and hashing follow ordinary attribute semantics.
+`MDDB(path)` opens the mddb at `path`; mutation operations require a git-backed deck and fail with a native filesystem/git exception if it is not one (the deck lock and git both fire native errors — no defensive deck check in core). `MDDB.init(path)` bootstraps a fresh one (`mkdir -p`, `git init`, commits a `.gitignore` containing `*.tmp`). Two explicit entry points — no silent "create if missing." `Card` is composition, not a dict subclass: callers write `card.yaml["key"] = value` and `card.body = "..."`. Equality, pickling, and hashing follow ordinary attribute semantics.
 
 ### Card format
 
@@ -198,16 +201,17 @@ Blobs are git-tracked through normal `git add`/`git mv`/`git rm`. Git LFS's clea
 
 ### Mutation flow
 
-All mutation flows through `db.editor()`. The commit phase, on clean `__exit__`:
+All mutation flows through `db.editor()`. The commit phase, on clean `__exit__`, runs under an advisory `fcntl.flock` on `.git/mddb.lock` (`_index.deck_lock`) that serialises mddb writers:
 
+A. **Conflict check** (no mutation): compare the editor's `base` (explicit `base=`, else the deck HEAD captured at `__enter__`) to the deck's current HEAD; if they differ another mddb writer committed first → raise `ConflictError` (clean abort — nothing written). The lock makes this check + the commit atomic against other mddb writers.
 0. **Plan** (no mutation): snapshot staged deletes, compute each surviving card's final blob, and check every card+blob destination collision and blob trackedness. Any raise here leaves the working tree clean.
 1. `git rm` staged deletes (card + its blob).
 2. `git mv` staged moves — cards, then their carried blobs (parent dirs created as needed).
 3. Write staged creates/updates via temp file + `os.replace`, then `git add` (card, then a staged-create's blob bytes).
 4. One `git commit -m <rationale> -- <touched paths>` (path-restricted so unrelated pre-staged changes in the caller's working tree stay staged).
-5. SQLite insert/update/delete inside `with self.conn:`, caching each card's planned `blob_relpath`. If this raises, `sqlite3.Error` propagates and the cache may be left stale.
+5. SQLite insert/update/delete inside `with self.conn:`, caching each card's planned `blob_relpath` and writing `meta.git_head = <new HEAD>`. If this raises, `sqlite3.Error` propagates and the cache may be left stale (self-healed on the next open, below).
 
-The next `MDDB(path)` opens the cache if `meta.schema_version` matches; if missing or different version, it rebuilds from `.md` files on disk. There is no automatic stale-cache detection. If a SQLite mutation fails and you want a fresh index, `rm ~/.cache/mddb/<sha1(abs-path)>/index.sqlite` and reopen.
+`base` is whole-deck: ANY concurrent mddb commit (even to a disjoint card) moves HEAD and fails the check — the loser re-reads at the new HEAD and retries. Out of scope: a raw external `git commit` (it ignores the lock) and uncommitted vim/Syncthing edits. The next `MDDB(path)` opens the cache if `meta.schema_version` matches AND `meta.git_head == HEAD`; otherwise it rebuilds from `.md` files on disk (the HEAD-mismatch rebuild takes `deck_lock` + rechecks). This makes a stale cache self-heal; manual `rm` of the cache is no longer needed.
 
 ### SQLite
 
@@ -222,7 +226,7 @@ CREATE VIRTUAL TABLE entries_fts USING fts5(yaml_text, body, content='entries', 
 
 `title` and `summary` are promoted to dedicated nullable columns on `entries` because they are part of the substrate filing/disclosure vocabulary; `db.list()` reads them directly. `blob_relpath` is likewise a dedicated nullable column — a derived cache of `blob_on_disk(card)` (see "Blob cards"), refreshed on every create/move/update and rebuilt by the cache rebuild, so `db.list()` reports blob presence in bulk without a per-card filesystem scan. The substrate computes that column from disk, not from YAML, so the derived column is never an `entry_fields` row. `entry_fields` indexes every *other* top-level scalar and list-of-scalars from `card.yaml` (notably `tags`) but skips `title`/`summary` (their own dedicated columns).
 
-SQLite default journal mode (single-writer). FTS sync via the standard external-content triggers (AI / AD / AU with the `'delete'` row idiom). `entries.body` and `entries.yaml_text` duplicate disk content for FTS; reads always go to disk.
+SQLite default journal mode (single-writer). FTS sync via the standard external-content triggers (AI / AD / AU with the `'delete'` row idiom). `entries.body` and `entries.yaml_text` duplicate disk content for FTS; reads always go to disk. The `meta` table also holds `git_head` — the commit the cache reflects; `open_index` rebuilds when it drifts from the deck's HEAD (cache freshness / self-heal).
 
 ### Querying
 
@@ -332,8 +336,8 @@ One stateless server serves **many** decks: every tool takes `deck` (an absolute
 
 Two tools, mirroring mddb's two API halves (the read surface and the editor):
 
-- `read(deck, op, id="", sql="", params="[]")` — `op` ∈ `list | get | history | query | blob`. `query` runs raw read-only SQL via `_index.open_index_readonly` (a `mode=ro` connection — query SQL can't corrupt the cache; no row cap, the caller writes `LIMIT`); the read tool's description injects `_index.SCHEMA_DOC` so the agent knows the tables. `blob` returns the on-disk blob path (bytes not inlined).
-- `editor(deck, rationale, ops)` — `ops` is a JSON-array string run as ONE `db.editor()` block → one commit. Op shapes mirror `_Editor` (`create`/`update`/`delete`/`move`/`edit`); optional fields are membership-gated (no `dict.get`); `update` re-reads via `e.read` to dodge the stale-snapshot footgun. Any `id` may be `"$prev[N]"` to reference the id returned by the Nth earlier op. The sole non-`_Editor` op is `init` (bootstrap a deck via `MDDB.init`) — explicit, never silent-create-on-open; it must be the only op in the batch and bypasses the `_open` deck check.
+- `read(deck, op, id="", sql="", params="[]")` — `op` ∈ `list | get | history | query | blob`. Every response is an envelope `{"base": <cache-reflected head>, "result": ...}`: `base = _index.git_head(db.conn)` (the commit the cache-backed payload reflects, NOT live HEAD — which can run ahead of the cache mid-commit), captured before the payload so it's conservative. `query` runs raw read-only SQL via `_index.open_index_readonly` (a `mode=ro` connection — query SQL can't corrupt the cache; no row cap, the caller writes `LIMIT`); the read tool's description injects `_index.SCHEMA_DOC` so the agent knows the tables. `blob` returns the on-disk blob path (bytes not inlined).
+- `editor(deck, rationale, ops, base="")` — `ops` is a JSON-array string run as ONE `db.editor()` block → one commit. `base` (thread the `base` from the `read` whose data you're editing) → `db.editor(base=...)`: cross-call conflict-safety, so a concurrent agent's commit raises `ConflictError` (→ `ToolError`; re-read and retry) instead of clobbering. Op shapes mirror `_Editor` (`create`/`update`/`delete`/`move`/`edit`); optional fields are membership-gated (no `dict.get`); `update` re-reads via `e.read` to dodge the stale-snapshot footgun. Any `id` may be `"$prev[N]"` to reference the id returned by the Nth earlier op. The sole non-`_Editor` op is `init` (bootstrap a deck via `MDDB.init`) — explicit, never silent-create-on-open; it must be the only op in the batch and bypasses the `_open` deck check and `base`.
 
 Returns are plain dict/list (no Pydantic response models); errors propagate natively and FastMCP wraps them as `ToolError`. No connection cleanup — per-call locals are closed by refcount, matching the core (which never closes `db.conn`).
 
@@ -391,7 +395,7 @@ Other ruff defaults are left alone.
 - `relpath` must be relative, canonical (no `.` or `..` path parts), inside the mddb root after symlink resolution, AND textually equal to its resolved relative path (no symlink aliases). Validated at `create` and `move`; other operations preserve the existing relpath. Violations raise `ValueError` — the substrate refuses to store a relpath the cache rebuild can't reproduce.
 - `editor` commits only the paths it touched (via `git commit -- <paths>`); pre-staged unrelated changes in the caller's working tree are left staged, not swept into the editor's commit.
 - SQLite is disposable; `.md` files and git are truth.
-- Concurrent writers from another process are outside the prototype contract.
+- Concurrent **mddb** writers (multiple processes / MCP agents using `db.editor`) are serialised by a short `.git/mddb.lock` flock and a whole-deck base-vs-HEAD check that raises `ConflictError` (re-read and retry). `MDDB.editor(base=<sha from MDDB.head()>)` guards a read→write span that began before the block; the `base=""` default only catches a commit landing *during* the block. Still out of contract: a raw external `git commit` and uncommitted vim/Syncthing edits (they don't take the lock).
 - A card owns the single non-`.md`, nonempty-suffix file in its directory whose stem **exactly** equals the card's stem. Exact-stem (not prefix): `notes.extra.pdf` belongs to `notes.extra.md`, not `notes.md`. Two qualifying siblings → `ValueError` (drift) at read/rebuild/lifecycle.
 - `card.blob` is a `Path` (or `None`), not bytes — read bytes with `card.blob.read_bytes()` or stream with `card.blob.open("rb")`. It is stamped by `MDDB.read` from disk, not carried in the `.md`; `str(card)` does not include it, and it's excluded from `Card` equality. `editor.create` returns a card with `blob=None` (the file isn't written until commit) — re-read via `db.read` to get the path.
 - `blob_ext` is single-suffix only: `editor.create(blob=..., blob_ext=".tar.gz")` raises. Use `.tgz`/`.tbz` for archives. A `Path` blob with a multi-suffix name (`archive.tar.gz`) needs an explicit single-suffix `blob_ext`.

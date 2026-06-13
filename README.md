@@ -70,4 +70,9 @@ a new deck with `editor(deck, rationale, ops='[{"op":"init"}]')`. The core
 
 ## Status
 
-Prototype. Single-writer. Linux only.
+Prototype. Linux only. Concurrent mddb writers (multiple processes / MCP
+agents) are serialised by a short `.git/mddb.lock` and a base-vs-HEAD conflict
+check — a stale write raises `mddb.ConflictError` (re-read and retry) rather
+than silently clobbering; capture `base = db.head()` with your read and later
+pass `db.editor(base=base)` to guard that read→write span. Raw external `git` commits and uncommitted editor edits are
+not yet guarded.

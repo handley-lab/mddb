@@ -123,7 +123,7 @@ def _read_result(db, op, id, sql, params):
     if op == "query":
         ro = mddb._index.open_index_readonly(db.root)
         cur = ro.execute(sql, json.loads(params))
-        columns = [c[0] for c in cur.description] if cur.description else []
+        columns = [c[0] for c in cur.description]
         return {"columns": columns, "rows": [list(row) for row in cur.fetchall()]}
     if op == "blob":
         card = db.read(id)
@@ -169,6 +169,8 @@ def editor(
                 if "body" in op:
                     card.body = op["body"]
                 if "yaml" in op:
+                    if "id" in op["yaml"]:
+                        raise ValueError("id is immutable")
                     card.yaml.update(op["yaml"])
                 if "tags" in op:
                     e.update(card, summary=op["summary"], tags=op["tags"])

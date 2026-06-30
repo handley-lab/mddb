@@ -187,15 +187,19 @@ def test_install_preserves_existing_and_distinguishes_lookalikes(tmp_path):
     assert lines.count("*.md merge=mddb-card") == 1
 
 
-def test_conflicted_frontmatter_breaks_rebuild(tmp_path):
+def test_conflicted_frontmatter_breaks_reads_and_rebuild(tmp_path):
     db = mddb.MDDB.init(tmp_path / "deck")
+    with db.editor(rationale="seed card") as editor:
+        card = editor.create(title="Card", summary="base", relpath="card.md")
     conflicted = (
-        f"---\nid: {ID}\ntitle: Card\nsummary: "
+        f"---\nid: {card.id}\ntitle: Card\nsummary: "
         "<<<<<<< card.md (ours)\nours\n=======\ntheirs\n>>>>>>> card.md (theirs)\n"
         "---\nbody\n"
     )
     (db.root / "card.md").write_text(conflicted)
     with pytest.raises(yaml.YAMLError):
         Card.from_file(db.root / "card.md")
+    with pytest.raises(yaml.YAMLError):
+        db.read(card.id)
     with pytest.raises(yaml.YAMLError):
         rebuild_index(db.root)

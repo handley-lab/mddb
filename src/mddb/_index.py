@@ -27,7 +27,10 @@ entry_fields(entry_rowid -> entries.rowid, key, value_str, value_num)
 entries_fts(yaml_text, body)
   FTS5 full-text index over entries; query as:
   SELECT id FROM entries WHERE rowid IN
-    (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ?)"""
+    (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ?)
+  MATCH is FTS5 syntax: phrases need quotes ("foo bar"), prefix is foo*,
+  and punctuation is operators (wind-up parses as wind NOT up) — bind the
+  user's words as a quoted phrase, or strip punctuation, before matching."""
 
 
 def open_index_readonly(root: Path) -> sqlite3.Connection:

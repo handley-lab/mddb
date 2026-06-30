@@ -1,0 +1,18 @@
+post_install() {
+  cat <<'EOF'
+mddb: the mddb-card merge driver is installed as /usr/bin/mddb-merge.
+
+Register it once per user so cards merge semantically in every deck:
+  git config --global merge.mddb-card.name   "mddb semantic card merge"
+  git config --global merge.mddb-card.driver "mddb-merge %O %A %B %P"
+(equivalently: python -c "from mddb._merge import install_global; install_global()")
+
+Each deck also needs "*.md merge=mddb-card" committed in its .gitattributes
+(mddb._merge.install(deck) ensures it). Without the global config git silently
+falls back to its default merge, which mangles YAML frontmatter.
+EOF
+}
+
+post_upgrade() {
+  post_install
+}

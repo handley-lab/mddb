@@ -199,6 +199,30 @@ Blobs are git-tracked through normal `git add`/`git mv`/`git rm`. Git LFS's clea
 
 `MDDB.init` does NOT write `.gitattributes` — LFS is operator policy, not substrate behaviour. With LFS, `card.blob.read_bytes()` returns the real bytes when the pointer is smudged, the pointer text otherwise; the substrate doesn't intervene.
 
+### Merge driver (`mddb-card`)
+
+For multi-agent / offline-then-sync workflows, concurrent edits land on divergent branches and reconcile by **merge** (never rebase — the merge DAG is the honest audit record). `git`'s default line-merge mangles YAML frontmatter and resurrects deleted tags, so `mddb` ships a custom merge driver in `src/mddb/_merge.py` (the `mddb-merge` console script). It is git-boundary plumbing reached only via the script / direct import — the core `import mddb` never imports it (like `_mcp.py`).
+
+Semantics, three-way at each part's natural granularity:
+
+- **`tags`**: three-way SET merge — a base-present tag survives iff *neither* side removed it (deletion wins); a base-absent tag is added iff *either* side added it (additions unioned). Never conflicts. (Not "add-wins": from snapshots you can't tell "kept" from "deleted-then-re-added", so a tag one side dropped is dropped.) Empty result omits the key.
+- **body**: delegated to `git merge-file` (line-level three-way; non-overlapping edits all apply, only same/overlapping lines conflict; multi-hunk conflicts honoured).
+- **`id`**: immutable. Existing-card merge requires `ours == base == theirs`, else raises (drift). add/add (no merge base) treats `id` as a scalar — differing ids are a path collision of two distinct cards → conflict marker.
+- **other scalars**: per-field three-way; genuine divergence emits standard git conflict markers *inside the frontmatter block*.
+
+Registration is **opt-in operator policy**, not auto in `MDDB.init` (same stance as LFS), and splits along how git propagates the two halves. The `merge.mddb-card.driver` command lives in git config, which is **never cloned**, so it cannot travel with a deck; the `*.md merge=mddb-card` attribute lives in `.gitattributes`, which **is** committed and travels. So:
+
+- `mddb._merge.install_global()` sets `merge.mddb-card.driver` in the user's **global** git config — run once per user/machine (the `git lfs install` model), and bake it into each agent image / service account. (git "global" is per-user, so multiple service accounts each need it.)
+- `mddb._merge.install(root)` ensures the deck's committed `.gitattributes` line (and sets the same config locally for that clone). Run once per deck; commit `.gitattributes`.
+
+Both are importable functions, not a CLI; the driver string points at the bare `mddb-merge` executable (stable across package upgrades), never a versioned path. With the global config present, fresh clones need no per-clone step.
+
+**Footgun — silent fallback.** If `.gitattributes` names `merge=mddb-card` but no driver is configured (a fresh clone on an unprovisioned account), git does **not** error — it silently uses its built-in text merge, which mangles frontmatter and resurrects deleted tags. git deliberately forbids a committed-in-repo executable driver (it would be an RCE vector), so this cannot be fixed by repo content; the driver config must be provisioned out-of-band (global config, the LFS model). Post-hoc YAML validation is *not* a substitute — a default merge can produce valid-but-wrong YAML; the driver is the safety mechanism. The Arch package's post-install note points at `install_global()`; package install does **not** write git config itself (it runs as root, so it would target the wrong `$HOME`, and mutating a user's git config on install is operator policy, not package behaviour).
+
+`mddb._merge.conflict_rationales(root, relpath)` surfaces, for a card conflicted mid-merge, the commit rationales on each side (`{"ours": [...], "theirs": [...]}`) — intent for an agent (or human) resolving the conflict.
+
+**Operational contract**: a *frontmatter* conflict writes markers into the YAML, so the card is not valid YAML until resolved — `Card.from_file`/`db.read`/`rebuild_index` raise on it (files-are-truth + crash-on-drift; no defensive skip logic — a deck mid-unresolved-merge is abnormal and must be resolved/aborted first). A *body-only* conflict keeps valid frontmatter, so the card still parses/rebuilds/indexes (markers indexed as body text); normal use is still out-of-contract until resolved.
+
 ### Mutation flow
 
 All mutation flows through `db.editor()`. The commit phase, on clean `__exit__`, runs under an advisory `fcntl.flock` on `.git/mddb.lock` (`_index.deck_lock`) that serialises mddb writers:
@@ -230,7 +254,7 @@ SQLite default journal mode (single-writer). FTS sync via the standard external-
 
 ### Querying
 
-There is no `search` / `compile_filter`. The substrate exposes `db.conn` and the schema; callers compose SQL directly. Examples:
+There is no `search` / `compile_filter`. The substrate exposes `db.conn` and the schema; callers compose SQL directly. `mddb.SCHEMA_DOC` is a public string documenting the three cache tables (`entries` / `entry_fields` / `entries_fts`) and the FTS `MATCH` idiom — an agent in a REPL can `print(mddb.SCHEMA_DOC)` to recall the schema without reading source, and the MCP `read` tool injects the same string into its description. Examples:
 
 ```python
 # full-text
@@ -336,7 +360,7 @@ One stateless server serves **many** decks: every tool takes `deck` (an absolute
 
 Two tools, mirroring mddb's two API halves (the read surface and the editor):
 
-- `read(deck, op, id="", sql="", params="[]")` — `op` ∈ `list | get | history | query | blob`. Every response is an envelope `{"base": <cache-reflected head>, "result": ...}`: `base = _index.git_head(db.conn)` (the commit the cache-backed payload reflects, NOT live HEAD — which can run ahead of the cache mid-commit), captured before the payload so it's conservative. `query` runs raw read-only SQL via `_index.open_index_readonly` (a `mode=ro` connection — query SQL can't corrupt the cache; no row cap, the caller writes `LIMIT`); the read tool's description injects `_index.SCHEMA_DOC` so the agent knows the tables. `blob` returns the on-disk blob path (bytes not inlined).
+- `read(deck, op, id="", sql="", params="[]")` — `op` ∈ `list | get | history | query | blob`. Every response is an envelope `{"base": <cache-reflected head>, "result": ...}`: `base = _index.git_head(db.conn)` (the commit the cache-backed payload reflects, NOT live HEAD — which can run ahead of the cache mid-commit), captured before the payload so it's conservative. `query` runs raw read-only SQL via `_index.open_index_readonly` (a `mode=ro` connection — query SQL can't corrupt the cache; no row cap, the caller writes `LIMIT`); the read tool's description injects `mddb.SCHEMA_DOC` so the agent knows the tables. `blob` returns the on-disk blob path (bytes not inlined).
 - `editor(deck, rationale, ops, base="")` — `ops` is a JSON-array string run as ONE `db.editor()` block → one commit. `base` (thread the `base` from the `read` whose data you're editing) → `db.editor(base=...)`: cross-call conflict-safety, so a concurrent agent's commit raises `ConflictError` (→ `ToolError`; re-read and retry) instead of clobbering. Op shapes mirror `_Editor` (`create`/`update`/`delete`/`move`/`edit`); optional fields are membership-gated (no `dict.get`); `update` re-reads via `e.read` to dodge the stale-snapshot footgun. Any `id` may be `"$prev[N]"` to reference the id returned by the Nth earlier op. The sole non-`_Editor` op is `init` (bootstrap a deck via `MDDB.init`) — explicit, never silent-create-on-open; it must be the only op in the batch and bypasses the `_open` deck check and `base`.
 
 Returns are plain dict/list (no Pydantic response models); errors propagate natively and FastMCP wraps them as `ToolError`. No connection cleanup — per-call locals are closed by refcount, matching the core (which never closes `db.conn`).

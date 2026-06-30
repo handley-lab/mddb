@@ -68,6 +68,46 @@ A non-existent/non-deck path errors clearly rather than reading empty; bootstrap
 a new deck with `editor(deck, rationale, ops='[{"op":"init"}]')`. The core
 `import mddb` does not pull in the MCP dependency.
 
+## Merge driver (optional)
+
+For multi-agent / offline-then-sync workflows, divergent branches reconcile by
+**merge** with a custom git driver (`mddb-card`) so cards merge *semantically*
+rather than by dumb line-merge: `tags` are three-way set-merged (deletions win,
+additions union, no resurrection), the body uses git's line-level three-way
+merge, `id` is immutable, and other frontmatter scalars conflict only on genuine
+divergence. Registration is opt-in operator policy (like LFS), in two parts.
+
+**Once per user/machine** — register the driver command globally (it lives in
+git config, which is never cloned, so it can't travel with a deck):
+
+```python
+from mddb._merge import install_global
+install_global()   # git config --global merge.mddb-card.driver "mddb-merge %O %A %B %P"
+```
+
+**Once per deck** — ensure the committed `.gitattributes` routes `*.md`
+(this part *does* travel with `git clone`):
+
+```python
+from mddb._merge import install
+install("/home/me/finance")   # ensures *.md merge=mddb-card; commit it once
+```
+
+With the global config in place, fresh clones of a deck need no per-clone step.
+**Without it git silently falls back to its default merge** (which mangles YAML
+frontmatter and resurrects deleted tags), so provision `install_global()` in
+each agent image / service account. The Arch package prints this as a
+post-install note.
+
+`mddb._merge.conflict_rationales(root, relpath)` returns each side's commit
+rationales for a card conflicted mid-merge — intent for an agent resolving it.
+
+While a *frontmatter* conflict is unresolved the card is not valid YAML, so
+`Card.from_file`, `db.read`, and the cache rebuild raise on it — a deck
+mid-unresolved-merge must be resolved (or the merge aborted) before normal use.
+A *body-only* conflict keeps valid frontmatter, so the card still reads and
+rebuilds (markers indexed as body text).
+
 ## Status
 
 Prototype. Linux only. Concurrent mddb writers (multiple processes / MCP

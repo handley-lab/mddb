@@ -220,11 +220,12 @@ def install(root):
         check=True,
     )
     attributes = root / ".gitattributes"
-    line = "*.md merge=mddb-card\n"
+    line = "*.md merge=mddb-card"
     existing = attributes.read_text() if attributes.exists() else ""
-    if line not in existing:
+    if line not in existing.splitlines():
+        prefix = "" if (not existing or existing.endswith("\n")) else "\n"
         with attributes.open("a") as handle:
-            handle.write(line)
+            handle.write(f"{prefix}{line}\n")
 
 
 def conflict_rationales(root, path):

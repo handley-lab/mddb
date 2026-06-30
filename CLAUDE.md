@@ -199,6 +199,23 @@ Blobs are git-tracked through normal `git add`/`git mv`/`git rm`. Git LFS's clea
 
 `MDDB.init` does NOT write `.gitattributes` — LFS is operator policy, not substrate behaviour. With LFS, `card.blob.read_bytes()` returns the real bytes when the pointer is smudged, the pointer text otherwise; the substrate doesn't intervene.
 
+### Merge driver (`mddb-card`)
+
+For multi-agent / offline-then-sync workflows, concurrent edits land on divergent branches and reconcile by **merge** (never rebase — the merge DAG is the honest audit record). `git`'s default line-merge mangles YAML frontmatter and resurrects deleted tags, so `mddb` ships a custom merge driver in `src/mddb/_merge.py` (the `mddb-merge` console script). It is git-boundary plumbing reached only via the script / direct import — the core `import mddb` never imports it (like `_mcp.py`).
+
+Semantics, three-way at each part's natural granularity:
+
+- **`tags`**: three-way SET merge — a base-present tag survives iff *neither* side removed it (deletion wins); a base-absent tag is added iff *either* side added it (additions unioned). Never conflicts. (Not "add-wins": from snapshots you can't tell "kept" from "deleted-then-re-added", so a tag one side dropped is dropped.) Empty result omits the key.
+- **body**: delegated to `git merge-file` (line-level three-way; non-overlapping edits all apply, only same/overlapping lines conflict; multi-hunk conflicts honoured).
+- **`id`**: immutable. Existing-card merge requires `ours == base == theirs`, else raises (drift). add/add (no merge base) treats `id` as a scalar — differing ids are a path collision of two distinct cards → conflict marker.
+- **other scalars**: per-field three-way; genuine divergence emits standard git conflict markers *inside the frontmatter block*.
+
+Registration is **opt-in operator policy**, not auto in `MDDB.init` (same stance as LFS). `mddb._merge.install(root)` (an importable function, not a CLI) sets the per-clone `merge.mddb-card.driver` config and ensures `.gitattributes` routes `*.md merge=mddb-card`; the operator commits `.gitattributes` once.
+
+`mddb._merge.conflict_rationales(root, relpath)` surfaces, for a card conflicted mid-merge, the commit rationales on each side (`{"ours": [...], "theirs": [...]}`) — intent for an agent (or human) resolving the conflict.
+
+**Operational contract**: a *frontmatter* conflict writes markers into the YAML, so the card is not valid YAML until resolved — `Card.from_file`/`db.read`/`rebuild_index` raise on it (files-are-truth + crash-on-drift; no defensive skip logic — a deck mid-unresolved-merge is abnormal and must be resolved/aborted first). A *body-only* conflict keeps valid frontmatter, so the card still parses/rebuilds/indexes (markers indexed as body text); normal use is still out-of-contract until resolved.
+
 ### Mutation flow
 
 All mutation flows through `db.editor()`. The commit phase, on clean `__exit__`, runs under an advisory `fcntl.flock` on `.git/mddb.lock` (`_index.deck_lock`) that serialises mddb writers:

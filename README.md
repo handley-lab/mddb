@@ -68,6 +68,30 @@ A non-existent/non-deck path errors clearly rather than reading empty; bootstrap
 a new deck with `editor(deck, rationale, ops='[{"op":"init"}]')`. The core
 `import mddb` does not pull in the MCP dependency.
 
+## Merge driver (optional)
+
+For multi-agent / offline-then-sync workflows, divergent branches reconcile by
+**merge** with a custom git driver (`mddb-card`) so cards merge *semantically*
+rather than by dumb line-merge: `tags` are three-way set-merged (deletions win,
+additions union, no resurrection), the body uses git's line-level three-way
+merge, `id` is immutable, and other frontmatter scalars conflict only on genuine
+divergence. Registration is opt-in operator policy (like LFS):
+
+```python
+from mddb._merge import install
+install("/home/me/finance")   # sets the per-clone driver config + .gitattributes
+# then commit the .gitattributes once
+```
+
+`mddb._merge.conflict_rationales(root, relpath)` returns each side's commit
+rationales for a card conflicted mid-merge — intent for an agent resolving it.
+
+While a *frontmatter* conflict is unresolved the card is not valid YAML, so
+`Card.from_file`, `db.read`, and the cache rebuild raise on it — a deck
+mid-unresolved-merge must be resolved (or the merge aborted) before normal use.
+A *body-only* conflict keeps valid frontmatter, so the card still reads and
+rebuilds (markers indexed as body text).
+
 ## Status
 
 Prototype. Linux only. Concurrent mddb writers (multiple processes / MCP

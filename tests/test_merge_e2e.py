@@ -6,7 +6,7 @@ import yaml
 
 import mddb
 from mddb._index import rebuild_index
-from mddb._merge import install, install_global
+from mddb._merge import install, install_global, require_installed
 from mddb.card import Card
 
 ID = "11111111-1111-4111-8111-111111111111"
@@ -197,6 +197,33 @@ def test_install_global_writes_global_config(tmp_path, monkeypatch):
         text=True,
     ).stdout.strip()
     assert driver == "mddb-merge %O %A %B %P"
+
+
+def test_require_installed_passes_when_registered(tmp_path):
+    db = mddb.MDDB.init(tmp_path / "deck")
+    install(db.root)
+    require_installed(db.root)
+
+
+def _isolate_git_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "empty-gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+
+def test_require_installed_raises_without_attribute(tmp_path, monkeypatch):
+    db = mddb.MDDB.init(tmp_path / "deck")
+    _git(db.root, "config", "merge.mddb-card.driver", "mddb-merge %O %A %B %P")
+    _isolate_git_config(monkeypatch, tmp_path)
+    with pytest.raises(RuntimeError):
+        require_installed(db.root)
+
+
+def test_require_installed_raises_without_driver(tmp_path, monkeypatch):
+    db = mddb.MDDB.init(tmp_path / "deck")
+    (db.root / ".gitattributes").write_text("*.md merge=mddb-card\n")
+    _isolate_git_config(monkeypatch, tmp_path)
+    with pytest.raises(RuntimeError):
+        require_installed(db.root)
 
 
 def test_conflicted_frontmatter_breaks_reads_and_rebuild(tmp_path):

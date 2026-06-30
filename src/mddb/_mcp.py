@@ -16,6 +16,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
 import mddb
+from mddb._merge import require_installed
 
 mcp = FastMCP("mddb")
 
@@ -50,9 +51,11 @@ string. Two modes:
 - Bootstrap: `ops=[{"op":"init"}]` (the sole op) creates a new empty deck at
   `deck` via MDDB.init, which makes its own bootstrap commit — `rationale` is
   ignored. Use this once before editing; the deck must not already exist.
-- Edit: any other batch requires an EXISTING deck (a non-deck path errors) and
-  runs in one editor block, landing as ONE git commit (message = `rationale`) on
-  success. An error while building the batch rolls it back with no disk change; a
+- Edit: any other batch requires an EXISTING deck (a non-deck path errors) with
+  the `mddb-card` merge driver registered (else errors — run
+  `mddb._merge.install(deck)` + `install_global()`; an unregistered clone would
+  silently default-merge and corrupt cards) and runs in one editor block,
+  landing as ONE git commit (message = `rationale`) on success. An error while building the batch rolls it back with no disk change; a
   failure during the commit itself propagates and may leave the working tree/cache
   dirty. There is no batch-size cap. Edit operations (dispatched on `op`):
 
@@ -149,6 +152,7 @@ def editor(
         mddb.MDDB.init(deck)
         return {"results": [{"op": "init", "deck": deck}]}
     db = _open(deck)
+    require_installed(deck)
     results = []
     with db.editor(rationale=rationale, base=base) as e:
         for op in parsed:

@@ -225,6 +225,42 @@ def install_global():
     _configure_driver(["--global"])
 
 
+def require_installed(root):
+    """Raise if the ``mddb-card`` merge driver is not active for the deck at ``root``.
+
+    Verifies *both* halves of registration: the deck's ``.gitattributes`` routes
+    ``*.md`` through ``mddb-card`` (committed, travels with clones) **and** the
+    ``merge.mddb-card.driver`` command is configured for this clone (local or
+    ``--global`` git config — never cloned). A fresh clone on an unprovisioned
+    account has the first but not the second, so git would silently fall back to
+    its default merge; call this at a multi-agent write boundary to fail loudly.
+
+    Args:
+        root: Path to the deck root (a git working tree).
+
+    Raises:
+        RuntimeError: the ``*.md`` attribute is unset or the driver is unconfigured.
+        subprocess.CalledProcessError: ``root`` is not a git working tree.
+    """
+    root = Path(root)
+    attr = subprocess.run(
+        ["git", "-C", str(root), "check-attr", "merge", "--", "probe.md"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    driver = subprocess.run(
+        ["git", "-C", str(root), "config", "--get", "merge.mddb-card.driver"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if not attr.endswith(": merge: mddb-card") or not driver:
+        raise RuntimeError(
+            f"{root}: mddb-card merge driver not active — run "
+            "mddb._merge.install(deck) (per deck) and install_global() (per user)"
+        )
+
+
 def _configure_driver(scope, cwd=None):
     subprocess.run(
         ["git", "config", *scope, "merge.mddb-card.name", "mddb semantic card merge"],

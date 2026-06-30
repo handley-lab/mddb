@@ -8,7 +8,15 @@ pytest.importorskip("mcp")
 
 from mcp.server.fastmcp.exceptions import ToolError  # noqa: E402
 
+import mddb  # noqa: E402
+from mddb._merge import install  # noqa: E402
 from mddb._mcp import mcp  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _install_driver(request):
+    if "db" in request.fixturenames:
+        install(request.getfixturevalue("db").root)
 
 
 def _result(content):
@@ -189,11 +197,23 @@ async def test_non_deck_path_errors_without_writing(tmp_path):
     assert list(not_a_deck.iterdir()) == []
 
 
+async def test_editor_requires_driver_installed(tmp_path, monkeypatch):
+    db = mddb.MDDB.init(tmp_path / "deck")
+    (db.root / ".gitattributes").write_text("*.md merge=mddb-card\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "empty-gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    with pytest.raises(ToolError) as exc:
+        await _edit(str(db.root), "x", [{"op": "create", "title": "A", "summary": "a"}])
+    message = str(exc.value).lower()
+    assert "driver" in message or "install" in message
+
+
 async def test_init_creates_deck(tmp_path):
     new_deck = str(tmp_path / "fresh")
     out = await _edit(new_deck, "ignored for init", [{"op": "init"}])
     assert out["results"][0]["op"] == "init"
     assert (tmp_path / "fresh" / ".git").is_dir()
+    install(new_deck)
     created = await _edit(
         new_deck, "first card", [{"op": "create", "title": "A", "summary": "a"}]
     )

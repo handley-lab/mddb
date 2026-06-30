@@ -254,7 +254,7 @@ SQLite default journal mode (single-writer). FTS sync via the standard external-
 
 ### Querying
 
-There is no `search` / `compile_filter`. The substrate exposes `db.conn` and the schema; callers compose SQL directly. Examples:
+There is no `search` / `compile_filter`. The substrate exposes `db.conn` and the schema; callers compose SQL directly. `mddb.SCHEMA_DOC` is a public string documenting the three cache tables (`entries` / `entry_fields` / `entries_fts`) and the FTS `MATCH` idiom — an agent in a REPL can `print(mddb.SCHEMA_DOC)` to recall the schema without reading source, and the MCP `read` tool injects the same string into its description. Examples:
 
 ```python
 # full-text
@@ -360,7 +360,7 @@ One stateless server serves **many** decks: every tool takes `deck` (an absolute
 
 Two tools, mirroring mddb's two API halves (the read surface and the editor):
 
-- `read(deck, op, id="", sql="", params="[]")` — `op` ∈ `list | get | history | query | blob`. Every response is an envelope `{"base": <cache-reflected head>, "result": ...}`: `base = _index.git_head(db.conn)` (the commit the cache-backed payload reflects, NOT live HEAD — which can run ahead of the cache mid-commit), captured before the payload so it's conservative. `query` runs raw read-only SQL via `_index.open_index_readonly` (a `mode=ro` connection — query SQL can't corrupt the cache; no row cap, the caller writes `LIMIT`); the read tool's description injects `_index.SCHEMA_DOC` so the agent knows the tables. `blob` returns the on-disk blob path (bytes not inlined).
+- `read(deck, op, id="", sql="", params="[]")` — `op` ∈ `list | get | history | query | blob`. Every response is an envelope `{"base": <cache-reflected head>, "result": ...}`: `base = _index.git_head(db.conn)` (the commit the cache-backed payload reflects, NOT live HEAD — which can run ahead of the cache mid-commit), captured before the payload so it's conservative. `query` runs raw read-only SQL via `_index.open_index_readonly` (a `mode=ro` connection — query SQL can't corrupt the cache; no row cap, the caller writes `LIMIT`); the read tool's description injects `mddb.SCHEMA_DOC` so the agent knows the tables. `blob` returns the on-disk blob path (bytes not inlined).
 - `editor(deck, rationale, ops, base="")` — `ops` is a JSON-array string run as ONE `db.editor()` block → one commit. `base` (thread the `base` from the `read` whose data you're editing) → `db.editor(base=...)`: cross-call conflict-safety, so a concurrent agent's commit raises `ConflictError` (→ `ToolError`; re-read and retry) instead of clobbering. Op shapes mirror `_Editor` (`create`/`update`/`delete`/`move`/`edit`); optional fields are membership-gated (no `dict.get`); `update` re-reads via `e.read` to dodge the stale-snapshot footgun. Any `id` may be `"$prev[N]"` to reference the id returned by the Nth earlier op. The sole non-`_Editor` op is `init` (bootstrap a deck via `MDDB.init`) — explicit, never silent-create-on-open; it must be the only op in the batch and bypasses the `_open` deck check and `base`.
 
 Returns are plain dict/list (no Pydantic response models); errors propagate natively and FastMCP wraps them as `ToolError`. No connection cleanup — per-call locals are closed by refcount, matching the core (which never closes `db.conn`).

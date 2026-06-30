@@ -30,7 +30,7 @@ _READ_DESCRIPTION = f"""Read from an mddb deck. Dispatches on `op`:
   cache and returns {{columns, rows}}. There is NO row cap — write your own
   LIMIT or large results will flood the agent context. Schema:
 
-{mddb._index.SCHEMA_DOC}
+{mddb.SCHEMA_DOC}
 
 - `blob` (needs `id`): {{path}} — the absolute on-disk path of the card's binary
   blob (bytes are not inlined); errors if the card has no blob.

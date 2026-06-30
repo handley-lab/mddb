@@ -9,5 +9,5 @@ for callers who want to compose SQL directly.
 from ._core import ConflictError, MDDB
 from .card import Card
 
-__version__ = "0.0.12"
+__version__ = "0.0.14"
 __all__ = ["MDDB", "Card", "ConflictError"]

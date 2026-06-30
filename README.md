@@ -75,13 +75,29 @@ For multi-agent / offline-then-sync workflows, divergent branches reconcile by
 rather than by dumb line-merge: `tags` are three-way set-merged (deletions win,
 additions union, no resurrection), the body uses git's line-level three-way
 merge, `id` is immutable, and other frontmatter scalars conflict only on genuine
-divergence. Registration is opt-in operator policy (like LFS):
+divergence. Registration is opt-in operator policy (like LFS), in two parts.
+
+**Once per user/machine** — register the driver command globally (it lives in
+git config, which is never cloned, so it can't travel with a deck):
+
+```python
+from mddb._merge import install_global
+install_global()   # git config --global merge.mddb-card.driver "mddb-merge %O %A %B %P"
+```
+
+**Once per deck** — ensure the committed `.gitattributes` routes `*.md`
+(this part *does* travel with `git clone`):
 
 ```python
 from mddb._merge import install
-install("/home/me/finance")   # sets the per-clone driver config + .gitattributes
-# then commit the .gitattributes once
+install("/home/me/finance")   # ensures *.md merge=mddb-card; commit it once
 ```
+
+With the global config in place, fresh clones of a deck need no per-clone step.
+**Without it git silently falls back to its default merge** (which mangles YAML
+frontmatter and resurrects deleted tags), so provision `install_global()` in
+each agent image / service account. The Arch package prints this as a
+post-install note.
 
 `mddb._merge.conflict_rationales(root, relpath)` returns each side's commit
 rationales for a card conflicted mid-merge — intent for an agent resolving it.

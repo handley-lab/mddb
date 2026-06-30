@@ -8,6 +8,7 @@ url='https://github.com/handley-lab/mddb'
 license=('MIT')
 depends=('python' 'python-yaml' 'python-slugify' 'git')
 optdepends=('python-mcp: MCP server (mcp-mddb) for cross-process agents')
+install=python-mddb.install
 
 package() {
   cd "$startdir"

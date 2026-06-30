@@ -6,7 +6,7 @@ import yaml
 
 import mddb
 from mddb._index import rebuild_index
-from mddb._merge import install
+from mddb._merge import install, install_global
 from mddb.card import Card
 
 ID = "11111111-1111-4111-8111-111111111111"
@@ -185,6 +185,18 @@ def test_install_preserves_existing_and_distinguishes_lookalikes(tmp_path):
     assert "# *.md merge=mddb-card" in lines
     assert "docs/*.md merge=mddb-card" in lines
     assert lines.count("*.md merge=mddb-card") == 1
+
+
+def test_install_global_writes_global_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
+    install_global()
+    driver = subprocess.run(
+        ["git", "config", "--global", "--get", "merge.mddb-card.driver"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert driver == "mddb-merge %O %A %B %P"
 
 
 def test_conflicted_frontmatter_breaks_reads_and_rebuild(tmp_path):

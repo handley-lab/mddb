@@ -28,6 +28,7 @@ import yaml
 from .card import Card
 
 _MISSING = object()
+_DRIVER = "mddb-merge %O %A %B %P"
 
 
 def _read_card(path):
@@ -197,28 +198,7 @@ def install(root):
         subprocess.CalledProcessError: a ``git config`` invocation failed.
     """
     root = Path(root)
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(root),
-            "config",
-            "merge.mddb-card.name",
-            "mddb semantic card merge",
-        ],
-        check=True,
-    )
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(root),
-            "config",
-            "merge.mddb-card.driver",
-            "mddb-merge %O %A %B %P",
-        ],
-        check=True,
-    )
+    _configure_driver([], cwd=root)
     attributes = root / ".gitattributes"
     line = "*.md merge=mddb-card"
     existing = attributes.read_text() if attributes.exists() else ""
@@ -226,6 +206,36 @@ def install(root):
         prefix = "" if (not existing or existing.endswith("\n")) else "\n"
         with attributes.open("a") as handle:
             handle.write(f"{prefix}{line}\n")
+
+
+def install_global():
+    """Register the ``mddb-card`` driver in the user's global git config.
+
+    The driver command (``merge.mddb-card.driver``) lives in git config, which
+    is never cloned, so it cannot travel with a deck. Setting it ``--global``
+    once per user/machine (the ``git lfs install`` model) makes every deck on
+    that account merge correctly off its committed ``.gitattributes`` — fresh
+    clones need no per-clone step. Without it, git silently falls back to its
+    built-in text merge (mangling frontmatter, resurrecting deleted tags), so
+    provision this in each agent image / service account.
+
+    Raises:
+        subprocess.CalledProcessError: a ``git config`` invocation failed.
+    """
+    _configure_driver(["--global"])
+
+
+def _configure_driver(scope, cwd=None):
+    subprocess.run(
+        ["git", "config", *scope, "merge.mddb-card.name", "mddb semantic card merge"],
+        check=True,
+        cwd=cwd,
+    )
+    subprocess.run(
+        ["git", "config", *scope, "merge.mddb-card.driver", _DRIVER],
+        check=True,
+        cwd=cwd,
+    )
 
 
 def conflict_rationales(root, path):

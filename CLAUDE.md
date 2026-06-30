@@ -210,7 +210,14 @@ Semantics, three-way at each part's natural granularity:
 - **`id`**: immutable. Existing-card merge requires `ours == base == theirs`, else raises (drift). add/add (no merge base) treats `id` as a scalar — differing ids are a path collision of two distinct cards → conflict marker.
 - **other scalars**: per-field three-way; genuine divergence emits standard git conflict markers *inside the frontmatter block*.
 
-Registration is **opt-in operator policy**, not auto in `MDDB.init` (same stance as LFS). `mddb._merge.install(root)` (an importable function, not a CLI) sets the per-clone `merge.mddb-card.driver` config and ensures `.gitattributes` routes `*.md merge=mddb-card`; the operator commits `.gitattributes` once.
+Registration is **opt-in operator policy**, not auto in `MDDB.init` (same stance as LFS), and splits along how git propagates the two halves. The `merge.mddb-card.driver` command lives in git config, which is **never cloned**, so it cannot travel with a deck; the `*.md merge=mddb-card` attribute lives in `.gitattributes`, which **is** committed and travels. So:
+
+- `mddb._merge.install_global()` sets `merge.mddb-card.driver` in the user's **global** git config — run once per user/machine (the `git lfs install` model), and bake it into each agent image / service account. (git "global" is per-user, so multiple service accounts each need it.)
+- `mddb._merge.install(root)` ensures the deck's committed `.gitattributes` line (and sets the same config locally for that clone). Run once per deck; commit `.gitattributes`.
+
+Both are importable functions, not a CLI; the driver string points at the bare `mddb-merge` executable (stable across package upgrades), never a versioned path. With the global config present, fresh clones need no per-clone step.
+
+**Footgun — silent fallback.** If `.gitattributes` names `merge=mddb-card` but no driver is configured (a fresh clone on an unprovisioned account), git does **not** error — it silently uses its built-in text merge, which mangles frontmatter and resurrects deleted tags. git deliberately forbids a committed-in-repo executable driver (it would be an RCE vector), so this cannot be fixed by repo content; the driver config must be provisioned out-of-band (global config, the LFS model). Post-hoc YAML validation is *not* a substitute — a default merge can produce valid-but-wrong YAML; the driver is the safety mechanism. The Arch package's post-install note points at `install_global()`; package install does **not** write git config itself (it runs as root, so it would target the wrong `$HOME`, and mutating a user's git config on install is operator policy, not package behaviour).
 
 `mddb._merge.conflict_rationales(root, relpath)` surfaces, for a card conflicted mid-merge, the commit rationales on each side (`{"ours": [...], "theirs": [...]}`) — intent for an agent (or human) resolving the conflict.
 

@@ -276,3 +276,36 @@ def test_read_raises_on_two_blobs(db, seed):
     db._git("commit", "-q", "-m", "two blobs")
     with pytest.raises(ValueError, match="multiple blobs"):
         db.read(card.id)
+
+
+def test_concurrent_stale_cache_opens_do_not_race(tmp_path):
+    """Regression for issue #22: every rebuild path must hold deck_lock, so
+    concurrent openers of a stale cache never unlink it under each other."""
+    import threading
+
+    import mddb as mddb_mod
+
+    db = mddb_mod.MDDB.init(tmp_path / "deck")
+    with db.editor(rationale="seed a card for the rebuild race"):
+        pass
+    with db.editor(rationale="move HEAD so every fresh open must rebuild") as e:
+        e.create(title="Racer", summary="s")
+    from mddb import _index
+
+    _index.cache_path(db.root).unlink()
+
+    errors = []
+
+    def opener():
+        try:
+            handle = mddb_mod.MDDB(tmp_path / "deck")
+            handle.conn.execute("SELECT COUNT(*) FROM entries").fetchone()
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=opener) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []

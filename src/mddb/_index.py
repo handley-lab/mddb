@@ -92,12 +92,15 @@ def set_git_head(conn: sqlite3.Connection, sha: str) -> None:
 def open_index(root: Path, head: str = "") -> sqlite3.Connection:
     """Open the cache for ``root``, rebuilding it if the schema version or git HEAD drifted.
 
-    The fast path returns immediately when the schema version matches and the
-    cache already reflects ``head``. A schema mismatch (or missing cache) falls
-    through to :func:`rebuild_index`. A git-HEAD mismatch (``meta.git_head !=
-    head``) rebuilds too, but under :func:`deck_lock` with a recheck so a reader
-    never unlinks the shared cache while a writer is mid-sync. ``head == ""``
-    (no commits yet, e.g. during :meth:`MDDB.init`) skips the HEAD check.
+    The whole decision — fast-path probe and any rebuild (missing cache,
+    schema mismatch, git-HEAD mismatch) — runs under :func:`deck_lock`, so a
+    concurrent opener never probes or unlinks the shared cache while another
+    is mid-rebuild (which surfaced as SQLITE_READONLY / disk I/O errors on the
+    loser's connection). The flock is uncontended in the common case and
+    released as soon as the connection is returned. ``head == ""`` (no commits
+    yet) is the :meth:`MDDB.init` bootstrap, which constructs the instance
+    before ``git init`` — no ``.git`` to lock, and single-process by the
+    two-explicit-entry-points contract, so it opens unlocked.
 
     Args:
         root: Absolute path to the mddb directory.
@@ -106,27 +109,28 @@ def open_index(root: Path, head: str = "") -> sqlite3.Connection:
     Returns:
         A live ``sqlite3.Connection`` with foreign keys enabled.
     """
+    if not head:
+        conn = _open_fresh(root, head)
+        return conn if conn is not None else _rebuild_at(root, head)
+    with deck_lock(root):
+        conn = _open_fresh(root, head)
+        if conn is not None:
+            return conn
+        return _rebuild_at(root, head)
+
+
+def _open_fresh(root: Path, head: str) -> sqlite3.Connection | None:
+    """The fast path: the existing cache, iff schema and git HEAD both match."""
     db_path = cache_path(root)
-    if db_path.exists():
-        conn = sqlite3.connect(db_path)
-        conn.execute("PRAGMA foreign_keys=ON")
-        row = conn.execute(
-            "SELECT value FROM meta WHERE key='schema_version'"
-        ).fetchone()
-        if row and row[0] == SCHEMA_VERSION:
-            if not head or git_head(conn) == head:
-                return conn
-            conn.close()
-            with deck_lock(root):
-                conn = sqlite3.connect(db_path)
-                conn.execute("PRAGMA foreign_keys=ON")
-                if git_head(conn) == head:
-                    return conn
-                conn.close()
-                return _rebuild_at(root, head)
-        conn.close()
-        db_path.unlink()
-    return _rebuild_at(root, head)
+    if not db_path.exists():
+        return None
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA foreign_keys=ON")
+    row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+    if row and row[0] == SCHEMA_VERSION and (not head or git_head(conn) == head):
+        return conn
+    conn.close()
+    return None
 
 
 def _rebuild_at(root: Path, head: str) -> sqlite3.Connection:

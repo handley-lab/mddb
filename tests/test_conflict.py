@@ -88,18 +88,11 @@ def test_flock_serialises_concurrent_writers(db, seed):
     assert sorted(outcomes) == ["conflict", "ok"]
 
 
-def test_open_recheck_skips_rebuild_when_fresh(db, seed, monkeypatch):
+def test_open_skips_rebuild_when_fresh(db, seed, monkeypatch):
     seed(title="A", summary="a")
     head = db.head()
-    calls = {"n": 0}
-
-    def flaky_git_head(conn):
-        calls["n"] += 1
-        return "" if calls["n"] == 1 else head
-
-    monkeypatch.setattr(_index, "git_head", flaky_git_head)
     monkeypatch.setattr(
-        _index, "_rebuild_at", lambda *a: pytest.fail("recheck should skip rebuild")
+        _index, "_rebuild_at", lambda *a: pytest.fail("fresh open must not rebuild")
     )
     assert _index.open_index(db.root, head) is not None
 

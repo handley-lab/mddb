@@ -6,19 +6,25 @@ import fcntl
 import hashlib
 import os
 import sqlite3
+import subprocess
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
 
 from .card import Card
 
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "4"
 _SCHEMA = (Path(__file__).parent / "schema.sql").read_text()
 
 SCHEMA_DOC = """\
-entries(rowid, id, relpath, title, summary, blob_relpath, yaml_text, body)
+entries(rowid, id, relpath, title, summary, blob_relpath, first_commit, yaml_text, body)
   one row per card. id/relpath UNIQUE NOT NULL; title/summary/blob_relpath nullable.
+  first_commit is the author date of the first commit in the card's surviving
+  lineage (renames followed), canonical UTC ISO 'YYYY-MM-DDTHH:MM:SS+00:00' —
+  lexicographic order is chronological order. Derived from the deck's git
+  history at rebuild; never stored in the card's YAML.
   yaml_text is the serialised frontmatter; body is the markdown body.
 entry_fields(entry_rowid -> entries.rowid, key, value_str, value_num)
   one row per top-level scalar (and per item of a list-of-scalars) in a card's
@@ -146,7 +152,9 @@ def rebuild_index(root: Path) -> sqlite3.Connection:
 
     Walks the directory in sorted order, parses every card via
     :meth:`Card.from_file`, and inserts an ``entries`` row plus
-    ``entry_fields`` rows for each. Files under ``.git/`` are skipped.
+    ``entry_fields`` rows for each, with ``first_commit`` derived from the
+    deck's git history (:func:`first_commits`). Files under ``.git/`` are
+    skipped.
 
     Args:
         root: Absolute path to the mddb directory.
@@ -155,7 +163,8 @@ def rebuild_index(root: Path) -> sqlite3.Connection:
         A live ``sqlite3.Connection`` to the new cache.
 
     Raises:
-        ValueError: A ``.md`` file has malformed frontmatter.
+        ValueError: A ``.md`` file has malformed frontmatter, or a tracked
+            card has no git lineage (an uncommitted file is out of contract).
         sqlite3.IntegrityError: Two cards share the same ``id``.
     """
     db_path = cache_path(root)
@@ -164,23 +173,150 @@ def rebuild_index(root: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA)
+    md_paths = [
+        p for p in sorted(root.rglob("*.md")) if ".git" not in p.relative_to(root).parts
+    ]
+    relpaths = [str(p.relative_to(root)) for p in md_paths]
+    lineage = first_commits(root, relpaths)
     with conn:
         conn.execute(
             "INSERT INTO meta(key, value) VALUES ('schema_version', ?)",
             (SCHEMA_VERSION,),
         )
-        for md_path in sorted(root.rglob("*.md")):
-            if ".git" in md_path.relative_to(root).parts:
-                continue
+        for md_path, relpath in zip(md_paths, relpaths):
             blob = blob_on_disk(md_path)
             blob_relpath = str(blob.relative_to(root)) if blob else None
             insert(
                 conn,
                 Card.from_file(md_path),
-                str(md_path.relative_to(root)),
+                relpath,
+                lineage[relpath],
                 blob_relpath,
             )
     return conn
+
+
+def utc_iso(git_date: str) -> str:
+    """Normalise a git ``%aI`` author date to canonical UTC ISO.
+
+    The canonical form is ``YYYY-MM-DDTHH:MM:SS+00:00``, so lexicographic
+    order equals chronological order for every consumer.
+
+    Args:
+        git_date: An ISO-8601 date string as emitted by ``%aI`` (any offset).
+
+    Returns:
+        The same instant rendered in UTC.
+    """
+    return datetime.fromisoformat(git_date).astimezone(timezone.utc).isoformat()
+
+
+def first_commits(root: Path, relpaths: list[str]) -> dict[str, str]:
+    """Return each relpath's lineage-origin author date, canonical UTC ISO.
+
+    Two tiers, correct on arbitrary merge DAGs (decks sync by merge, so a
+    linearised-log replay is unsound — a side-branch delete not selected by a
+    merge would poison a global path map):
+
+    1. One full-DAG ``git log --name-status`` pass collects, per path, every
+       ``A`` date plus flags for any ``D``/``R`` involvement. A path with
+       exactly one ``A`` ever and no ``D``/``R`` involvement is unambiguous
+       regardless of topology — its single origin commit is its lineage
+       start. This covers the overwhelming majority of cards.
+    2. Every other requested path (re-adds, renames, D-touched, multi-A)
+       resolves exactly via ``git log --follow --diff-filter=A``, taking the
+       most recent add — the surviving lineage's origin.
+
+    A deck with no ``.git`` or no commits yields an empty map (the
+    :meth:`MDDB.init` bootstrap).
+
+    Args:
+        root: Absolute path to the mddb directory.
+        relpaths: The HEAD card relpaths needing lineage dates.
+
+    Returns:
+        ``{relpath: utc_iso_date}`` covering every requested relpath.
+
+    Raises:
+        ValueError: A requested path has no git lineage (uncommitted file —
+            out of contract), or the log stream contains an unknown status.
+    """
+    if not (root / ".git").is_dir():
+        return {}
+    head = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if head.returncode != 0:
+        return {}
+    log = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "log",
+            "--name-status",
+            "-M",
+            "-z",
+            "--pretty=format:%x01%H%x00%aI%x00",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    adds: dict[str, list[str]] = {}
+    touched: set[str] = set()
+    for chunk in log.split("\x01"):
+        tokens = [t for t in chunk.split("\x00") if t]
+        if not tokens:
+            continue
+        date = tokens[1]
+        i = 2
+        while i < len(tokens):
+            status = tokens[i].lstrip("\n")
+            if not status:
+                i += 1
+                continue
+            if status == "A":
+                adds.setdefault(tokens[i + 1], []).append(date)
+                i += 2
+            elif status in ("M", "D"):
+                if status == "D":
+                    touched.add(tokens[i + 1])
+                i += 2
+            elif status.startswith("R"):
+                touched.add(tokens[i + 1])
+                touched.add(tokens[i + 2])
+                i += 3
+            else:
+                raise ValueError(f"unknown git log status token: {status!r}")
+    lineage = {}
+    for relpath in relpaths:
+        dates = adds.get(relpath, [])
+        if len(dates) == 1 and relpath not in touched:
+            lineage[relpath] = utc_iso(dates[0])
+            continue
+        follow = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "log",
+                "--follow",
+                "--diff-filter=A",
+                "--format=%aI",
+                "--",
+                relpath,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split()
+        if not follow:
+            raise ValueError(f"no git lineage for {relpath}")
+        lineage[relpath] = utc_iso(follow[0])
+    return lineage
 
 
 def relpath_of(conn: sqlite3.Connection, card_id: str) -> str:
@@ -235,22 +371,26 @@ def insert(
     conn: sqlite3.Connection,
     card: Card,
     relpath: str,
+    first_commit: str,
     blob_relpath: str | None = None,
 ) -> None:
     """Cache a new card. Caller must already have written the file + committed.
 
+    ``first_commit`` is the card's lineage-origin author date in canonical
+    UTC ISO (see :func:`first_commits`); the schema rejects a missing value.
     ``blob_relpath`` is the relpath of the card's blob, or ``None`` when it
     has none (a real state, not an omitted argument).
     """
     cur = conn.execute(
-        "INSERT INTO entries(id, relpath, title, summary, blob_relpath, yaml_text, body) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO entries(id, relpath, title, summary, blob_relpath, first_commit, yaml_text, body) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
             card.id,
             relpath,
             card.yaml.get("title"),
             card.yaml.get("summary"),
             blob_relpath,
+            first_commit,
             _yaml_text(card),
             card.body,
         ),

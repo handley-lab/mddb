@@ -426,6 +426,7 @@ class _Editor:
                 else:
                     raise TypeError(f"unknown staged variant: {type(staged).__name__}")
             _index.set_git_head(self._db.conn, self._db.head())
+            _index.analyze(self._db.conn)
 
     def create(
         self,

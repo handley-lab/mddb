@@ -21,6 +21,7 @@ CREATE TABLE entry_fields(
 
 CREATE INDEX entry_fields_key_str ON entry_fields(key, value_str);
 CREATE INDEX entry_fields_key_num ON entry_fields(key, value_num);
+CREATE INDEX entry_fields_entry_key ON entry_fields(entry_rowid, key);
 
 CREATE VIRTUAL TABLE entries_fts USING fts5(
     yaml_text, body, content='entries', content_rowid='rowid'

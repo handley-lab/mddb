@@ -15,7 +15,7 @@ import yaml
 
 from .card import Card
 
-SCHEMA_VERSION = "4"
+SCHEMA_VERSION = "5"
 _SCHEMA = (Path(__file__).parent / "schema.sql").read_text()
 
 SCHEMA_DOC = """\
@@ -93,6 +93,19 @@ def set_git_head(conn: sqlite3.Connection, sha: str) -> None:
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (sha,),
     )
+
+
+def analyze(conn: sqlite3.Connection) -> None:
+    """Refresh the planner statistics the cache's join indexes rely on.
+
+    Without ``sqlite_stat1`` the planner mis-drives range-predicate joins over
+    ``entry_fields`` (measured 118ms vs 0.1ms on a 9,813-card deck). Runs
+    after every rebuild AND every editor commit — a deck born via
+    :meth:`MDDB.init` and grown incrementally never rebuilds, so commit-time
+    refresh is what keeps its statistics existing and current. Caller wraps
+    in ``with conn:``.
+    """
+    conn.execute("ANALYZE")
 
 
 def open_index(root: Path, head: str = "") -> sqlite3.Connection:
@@ -178,13 +191,25 @@ def rebuild_index(root: Path) -> sqlite3.Connection:
     ]
     relpaths = [str(p.relative_to(root)) for p in md_paths]
     lineage = first_commits(root, relpaths)
+    blobs_by_stem: dict[Path, dict[str, list[Path]]] = {}
+    for parent in {p.parent for p in md_paths}:
+        stems: dict[str, list[Path]] = {}
+        for sibling in parent.iterdir():
+            if sibling.is_file() and sibling.suffix not in ("", ".md"):
+                stems.setdefault(sibling.stem, []).append(sibling)
+        blobs_by_stem[parent] = stems
     with conn:
         conn.execute(
             "INSERT INTO meta(key, value) VALUES ('schema_version', ?)",
             (SCHEMA_VERSION,),
         )
         for md_path, relpath in zip(md_paths, relpaths):
-            blob = blob_on_disk(md_path)
+            hits = blobs_by_stem[md_path.parent].get(md_path.stem, [])
+            if len(hits) > 1:
+                raise ValueError(
+                    f"multiple blobs for {md_path.name}: {sorted(p.name for p in hits)}"
+                )
+            blob = hits[0] if hits else None
             blob_relpath = str(blob.relative_to(root)) if blob else None
             insert(
                 conn,
@@ -193,6 +218,7 @@ def rebuild_index(root: Path) -> sqlite3.Connection:
                 lineage[relpath],
                 blob_relpath,
             )
+        analyze(conn)
     return conn
 
 

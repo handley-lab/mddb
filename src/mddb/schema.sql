@@ -7,6 +7,7 @@ CREATE TABLE entries(
     title TEXT,
     summary TEXT,
     blob_relpath TEXT,
+    first_commit TEXT NOT NULL,
     yaml_text TEXT NOT NULL,
     body TEXT NOT NULL
 );

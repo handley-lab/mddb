@@ -399,13 +399,20 @@ class _Editor:
                     self._db._git("add", "--", blob_relpath)
                     touched.add(blob_relpath)
         self._db._git("commit", "-m", self._rationale, "--", *sorted(touched))
+        commit_date = _index.utc_iso(
+            self._db._git("log", "-1", "--format=%aI").stdout.strip()
+        )
         with self._db.conn:
             for card_id, staged in self._staged.items():
                 if isinstance(staged, _Delete):
                     _index.delete(self._db.conn, card_id)
                 elif isinstance(staged, _Create):
                     _index.insert(
-                        self._db.conn, staged.card, staged.relpath, final_blob[card_id]
+                        self._db.conn,
+                        staged.card,
+                        staged.relpath,
+                        commit_date,
+                        final_blob[card_id],
                     )
                 elif isinstance(staged, _Move):
                     _index.update_paths(

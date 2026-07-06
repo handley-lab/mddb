@@ -309,3 +309,33 @@ def test_concurrent_stale_cache_opens_do_not_race(tmp_path):
     for t in threads:
         t.join()
     assert errors == []
+
+
+def test_rebuild_leaves_planner_statistics(tmp_path):
+    import mddb
+    from mddb import _index
+
+    db = mddb.MDDB.init(tmp_path / "deck")
+    with db.editor(rationale="seed cards for planner statistics") as e:
+        e.create(title="One", summary="s", yaml={"kind": "x", "rank": 1})
+        e.create(title="Two", summary="s", yaml={"kind": "y", "rank": 2})
+    _index.cache_path(db.root).unlink()
+    db = mddb.MDDB(tmp_path / "deck")
+    assert db.conn.execute("SELECT count(*) FROM sqlite_stat1").fetchone()[0] > 0
+    plan = db.conn.execute(
+        "EXPLAIN QUERY PLAN "
+        "SELECT e.id FROM entry_fields a "
+        "JOIN entry_fields b ON b.entry_rowid = a.entry_rowid AND b.key='rank' "
+        "JOIN entries e ON e.rowid = a.entry_rowid "
+        "WHERE a.key='kind' AND a.value_str='x'"
+    ).fetchall()
+    assert any("entry_fields_entry_key" in row[3] for row in plan)
+
+
+def test_incremental_deck_gets_planner_statistics_without_rebuild(tmp_path):
+    import mddb
+
+    db = mddb.MDDB.init(tmp_path / "deck")
+    with db.editor(rationale="first card on a never-rebuilt deck") as e:
+        e.create(title="Fresh", summary="s", yaml={"kind": "x"})
+    assert db.conn.execute("SELECT count(*) FROM sqlite_stat1").fetchone()[0] > 0

@@ -28,7 +28,6 @@ These rules bound this codebase. They are themselves bound by lean code — don'
 
 - **No MCP, no Pydantic, no validation theatre in the core.** Alan is the agent constructing the calls; the Python API has no untrusted boundary, takes plain Python types, and raises plain Python exceptions. Cross-process agents now arrived, so an MCP server lives in the optional `mddb[mcp]` extra (`src/mddb/_mcp.py`, FastMCP + Pydantic `Field`s) — but it is a thin adapter over the same API and the core stays MCP/Pydantic-free (`import mddb` must not import either). Don't add Pydantic or validation to the core.
 
-- **Iterative reviews have a stopping rule.** When a review escalates into deeper checks for drift that requires unusual operator behaviour to trigger, stop and call convergence. "Lean code" is a bound, not a soft preference; an APPROVED that adds 300 lines is worse than a NOT APPROVED at 200.
 
 - **Boundaries translate errors, don't hide them.** The only real boundary is the disk and git. If git fails, `subprocess.CalledProcessError` propagates. If SQLite fails, `sqlite3.Error` propagates. We don't catch these to retranslate them; the caller sees the native exception with the native traceback.
 

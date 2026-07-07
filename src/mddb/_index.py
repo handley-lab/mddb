@@ -15,7 +15,7 @@ import yaml
 
 from .card import Card
 
-SCHEMA_VERSION = "5"
+SCHEMA_VERSION = "6"
 _SCHEMA = (Path(__file__).parent / "schema.sql").read_text()
 
 SCHEMA_DOC = """\
@@ -240,18 +240,23 @@ def utc_iso(git_date: str) -> str:
 def first_commits(root: Path, relpaths: list[str]) -> dict[str, str]:
     """Return each relpath's lineage-origin author date, canonical UTC ISO.
 
-    Two tiers, correct on arbitrary merge DAGs (decks sync by merge, so a
-    linearised-log replay is unsound — a side-branch delete not selected by a
-    merge would poison a global path map):
+    Lineage follows **renames, not copies**: a card copied-and-edited from
+    another is a new card with its own birth date (its source still exists as
+    its own card), so ``git log --follow``'s copy-chasing is deliberately not
+    reproduced.
 
-    1. One full-DAG ``git log --name-status`` pass collects, per path, every
-       ``A`` date plus flags for any ``D``/``R`` involvement. A path with
-       exactly one ``A`` ever and no ``D``/``R`` involvement is unambiguous
-       regardless of topology — its single origin commit is its lineage
-       start. This covers the overwhelming majority of cards.
-    2. Every other requested path (re-adds, renames, D-touched, multi-A)
-       resolves exactly via ``git log --follow --diff-filter=A``, taking the
-       most recent add — the surviving lineage's origin.
+    One ``git log --topo-order --reverse --name-status`` pass is replayed into
+    an ``origin`` map: ``A`` starts a lineage, ``R`` carries it, ``D`` ends it.
+    ``--topo-order`` gives a deterministic ancestor-before-descendant order over
+    merges. The replay resolves the overwhelming majority in-process; only a
+    HEAD path the linear replay cannot place — a delete linearised ahead of the
+    merge that preserved the file, or a rename whose source the replay lost
+    across a merge — falls back to the per-path ``git log --follow``, deferring
+    the genuinely DAG-ambiguous case to git's own traversal.
+
+    A missing rename source is left *unresolved* (routed to the fallback) rather
+    than dated from the rename commit: inventing that date would fabricate
+    provenance and mask the fallback.
 
     A deck with no ``.git`` or no commits yields an empty map (the
     :meth:`MDDB.init` bootstrap).
@@ -265,7 +270,8 @@ def first_commits(root: Path, relpaths: list[str]) -> dict[str, str]:
 
     Raises:
         ValueError: A requested path has no git lineage (uncommitted file —
-            out of contract), or the log stream contains an unknown status.
+            out of contract), or the log stream contains an unknown status
+            (a ``C`` copy record is unknown drift under ``-M``-only).
     """
     if not (root / ".git").is_dir():
         return {}
@@ -282,6 +288,8 @@ def first_commits(root: Path, relpaths: list[str]) -> dict[str, str]:
             "-C",
             str(root),
             "log",
+            "--topo-order",
+            "--reverse",
             "--name-status",
             "-M",
             "-z",
@@ -291,8 +299,7 @@ def first_commits(root: Path, relpaths: list[str]) -> dict[str, str]:
         text=True,
         check=True,
     ).stdout
-    adds: dict[str, list[str]] = {}
-    touched: set[str] = set()
+    origin: dict[str, str] = {}
     for chunk in log.split("\x01"):
         tokens = [t for t in chunk.split("\x00") if t]
         if not tokens:
@@ -305,23 +312,26 @@ def first_commits(root: Path, relpaths: list[str]) -> dict[str, str]:
                 i += 1
                 continue
             if status == "A":
-                adds.setdefault(tokens[i + 1], []).append(date)
+                origin[tokens[i + 1]] = date
                 i += 2
-            elif status in ("M", "D"):
-                if status == "D":
-                    touched.add(tokens[i + 1])
+            elif status == "M":
+                i += 2
+            elif status == "D":
+                origin.pop(tokens[i + 1], None)
                 i += 2
             elif status.startswith("R"):
-                touched.add(tokens[i + 1])
-                touched.add(tokens[i + 2])
+                old, new = tokens[i + 1], tokens[i + 2]
+                if old in origin:
+                    origin[new] = origin.pop(old)
+                else:
+                    origin.pop(new, None)
                 i += 3
             else:
                 raise ValueError(f"unknown git log status token: {status!r}")
     lineage = {}
     for relpath in relpaths:
-        dates = adds.get(relpath, [])
-        if len(dates) == 1 and relpath not in touched:
-            lineage[relpath] = utc_iso(dates[0])
+        if relpath in origin:
+            lineage[relpath] = utc_iso(origin[relpath])
             continue
         follow = subprocess.run(
             [

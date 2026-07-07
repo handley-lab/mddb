@@ -9,12 +9,13 @@ from pathlib import Path
 
 import yaml
 
-_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
-"""SafeLoader semantics on the parse hot path.
+_LOADER = yaml.CSafeLoader
+"""The libyaml C SafeLoader for the parse hot path.
 
-``CSafeLoader`` is the libyaml C implementation of ``SafeLoader`` — identical
-parse semantics, ~9x faster (a 10k-card rebuild's parse drops 5.2s → 0.6s).
-Falls back to the pure-Python ``SafeLoader`` on PyYAML builds without libyaml.
+Identical parse semantics to ``SafeLoader``, ~9x faster (a 10k-card rebuild's
+parse drops 5.2s → 0.6s). A hard reference, not a ``getattr`` fallback to the
+pure-Python loader: if libyaml is missing ``yaml.CSafeLoader`` raises at import,
+so the fast path failing is loud — never a silent 9x-slower degrade.
 """
 
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n(.*)", re.DOTALL)

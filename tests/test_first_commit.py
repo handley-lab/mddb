@@ -173,6 +173,44 @@ def test_rename_through_merge_preserves_original_date(tmp_path):
     assert first_commit_of(db, "after.md") == "2021-03-03T00:00:00+00:00"
 
 
+def test_copy_does_not_inherit_source_date(tmp_path):
+    root = tmp_path / "deck"
+    root.mkdir()
+    git(root, "init", "-q", "-b", "master")
+    body = "\n".join(f"shared boilerplate line {n}" for n in range(40))
+    (root / "source.md").write_text(
+        f"---\nid: {'a' * 32}\ntitle: source\nsummary: s\n---\n{body}\n"
+    )
+    commit(root, "add: source", "2020-01-01T00:00:00+00:00")
+    (root / "copy.md").write_text(
+        f"---\nid: {'b' * 32}\ntitle: copy\nsummary: s\n---\n{body}\n"
+    )
+    commit(root, "add: copy of source", "2024-12-31T00:00:00+00:00")
+    db = mddb.MDDB(root)
+    assert first_commit_of(db, "copy.md") == "2024-12-31T00:00:00+00:00"
+
+
+def test_delete_vs_move_merged_keeping_move_dates_from_the_add(tmp_path):
+    root = tmp_path / "deck"
+    root.mkdir()
+    git(root, "init", "-q", "-b", "master")
+    write_card(root, "foo.md", "a" * 32)
+    commit(root, "add: foo", "2019-02-02T00:00:00+00:00")
+    git(root, "checkout", "-q", "-b", "side")
+    (root / "archive").mkdir()
+    git(root, "mv", "foo.md", "archive/foo.md")
+    commit(root, "move foo into archive", "2019-08-08T00:00:00+00:00")
+    git(root, "checkout", "-q", "master")
+    (root / "foo.md").unlink()
+    commit(root, "delete foo as obsolete", "2019-05-05T00:00:00+00:00")
+    subprocess.run(["git", "-C", str(root), "merge", "--no-commit", "side"])
+    git(root, "checkout", "side", "--", "archive/foo.md")
+    (root / "foo.md").unlink(missing_ok=True)
+    commit(root, "resolve: keep the moved card", "2019-09-09T00:00:00+00:00")
+    db = mddb.MDDB(root)
+    assert first_commit_of(db, "archive/foo.md") == "2019-02-02T00:00:00+00:00"
+
+
 def test_unrelated_history_merge_preserves_both_sides(tmp_path):
     main = tmp_path / "main"
     main.mkdir()

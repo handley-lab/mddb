@@ -1,8 +1,60 @@
+import os
+import subprocess
+
 import pytest
 
 import mddb
 from mddb._index import blob_on_disk, cache_path
 from mddb.card import Card
+
+
+def test_init_rolls_back_a_failed_bootstrap(tmp_path, monkeypatch):
+    """A bootstrap whose commit fails (no committer identity) leaves no half-born
+    deck — a bare ``.git`` that a later ``MDDB(path)`` would open and then choke on."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    for var in (
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        "EMAIL",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    deck = tmp_path / "deck"
+    with pytest.raises(subprocess.CalledProcessError):
+        mddb.MDDB.init(deck)
+    assert not (deck / ".git").exists()
+    assert not (deck / ".gitignore").exists()
+
+
+def test_init_refuses_an_existing_repo(tmp_path):
+    """init is the fresh entry point: a pre-existing ``.git`` raises before any
+    mutation, so the failure rollback can never delete a repo init didn't create."""
+    deck = tmp_path / "deck"
+    deck.mkdir()
+    subprocess.run(["git", "init", "-q", deck], check=True)
+    sentinel = deck / ".git" / "SENTINEL"
+    sentinel.write_text("real repo")
+    with pytest.raises(FileExistsError):
+        mddb.MDDB.init(deck)
+    assert sentinel.read_text() == "real repo"
+
+
+def test_init_preserves_a_pre_existing_gitignore(tmp_path):
+    """A non-git dir with a ``.gitignore`` is refused before any mutation — the
+    failure rollback removes only the ``.gitignore`` init itself would create."""
+    deck = tmp_path / "deck"
+    deck.mkdir()
+    (deck / ".gitignore").write_text("secrets/\n")
+    with pytest.raises(FileExistsError):
+        mddb.MDDB.init(deck)
+    assert (deck / ".gitignore").read_text() == "secrets/\n"
+    assert not (deck / ".git").exists()
 
 
 def test_create_read(db, seed):

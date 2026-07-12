@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import uuid
 from collections.abc import Sequence
@@ -43,16 +44,34 @@ class MDDB:
 
         Creates the directory (``mkdir -p``), runs ``git init``, commits a
         ``.gitignore`` containing ``*.tmp``, and returns the opened handle.
+
+        Refuses a path that already holds a ``.git`` or ``.gitignore``
+        (``FileExistsError``): init is the *fresh* entry point, and the failure
+        rollback below removes exactly those two artifacts — so it must never run
+        where either already exists, or a failed bootstrap would delete a file it
+        didn't create.
         """
         root = Path(path).expanduser().resolve()
         root.mkdir(parents=True, exist_ok=True)
+        for existing in (root / ".git", root / ".gitignore"):
+            if existing.exists():
+                raise FileExistsError(existing)
         db = cls(root)
-        db._git("init", "-q", "-b", "master")
-        (root / ".gitignore").write_text("*.tmp\n")
-        db._git("add", "--", ".gitignore")
-        db._git("commit", "-q", "-m", "initial commit")
-        with db.conn:
-            _index.set_git_head(db.conn, db.head())
+        try:
+            db._git("init", "-q", "-b", "master")
+            (root / ".gitignore").write_text("*.tmp\n")
+            db._git("add", "--", ".gitignore")
+            db._git("commit", "-q", "-m", "initial commit")
+            with db.conn:
+                _index.set_git_head(db.conn, db.head())
+        except BaseException:
+            # A partial bootstrap (e.g. git commit failing on an unconfigured
+            # committer identity) must not leave a half-born deck: a `.git`
+            # without a commit that a later `MDDB(path)` opens and then chokes
+            # on. Roll back what init created and re-raise — crash cleanly.
+            shutil.rmtree(root / ".git", ignore_errors=True)
+            (root / ".gitignore").unlink(missing_ok=True)
+            raise
         return db
 
     def read(self, card_id: str) -> Card:

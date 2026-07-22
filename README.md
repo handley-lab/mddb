@@ -64,9 +64,10 @@ Two tools: `read(deck, op=list|get|history|query|blob, ...)` and
 `editor(deck, rationale, ops)` (a JSON-array of operations applied as one
 commit). For example, `read(deck="/home/me/finance", op="list")` or
 `editor(deck="/home/me/home", rationale="...", ops='[{"op":"create",...}]')`.
-A non-existent/non-deck path errors clearly rather than reading empty; bootstrap
-a new deck with `editor(deck, rationale, ops='[{"op":"init"}]')`. The core
-`import mddb` does not pull in the MCP dependency.
+A non-existent/non-deck path errors clearly rather than reading empty. Operators
+bootstrap decks with `MDDB.init`; the agent-facing server edits existing decks
+only. Blob creation accepts inline `blob_base64` plus `blob_ext`, never a
+server-local source path. The core `import mddb` does not pull in the MCP dependency.
 
 ## Merge driver (optional)
 
@@ -111,7 +112,7 @@ rebuilds (markers indexed as body text).
 ## Status
 
 Prototype. Linux only. Concurrent mddb writers (multiple processes / MCP
-agents) are serialised by a short `.git/mddb.lock` and a base-vs-HEAD conflict
+agents) are serialised by a short exclusive flock on the `.git` directory and a base-vs-HEAD conflict
 check — a stale write raises `mddb.ConflictError` (re-read and retry) rather
 than silently clobbering; capture `base = db.head()` with your read and later
 pass `db.editor(base=base)` to guard that read→write span. Raw external `git` commits and uncommitted editor edits are

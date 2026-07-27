@@ -1,7 +1,5 @@
 import subprocess
 
-import pytest
-
 import mddb
 from mddb import _index
 
@@ -12,13 +10,14 @@ def git(root, *args, date=""):
         import os
 
         env = os.environ | {"GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date}
-    return subprocess.run(
+    stdout = subprocess.run(
         ["git", "-C", str(root), *args],
         capture_output=True,
         text=True,
         check=True,
         env=env,
     ).stdout
+    return stdout
 
 
 def write_card(root, relpath, card_id):
@@ -94,15 +93,15 @@ def test_delete_then_readd_resets_to_the_readd(tmp_path):
     assert first_commit_of(db, "x.md") == "2024-01-01T00:00:00+00:00"
 
 
-def test_uncommitted_file_crashes_rebuild(tmp_path):
+def test_uncommitted_file_is_not_database_input(tmp_path):
     root = tmp_path / "deck"
     root.mkdir()
     git(root, "init", "-q", "-b", "master")
     write_card(root, "a.md", "a" * 32)
     commit(root, "add: a", "2024-01-01T00:00:00+00:00")
     write_card(root, "stray.md", "f" * 32)
-    with pytest.raises(ValueError, match="no git lineage"):
-        _index.rebuild_index(root)
+    db = _index.rebuild_index(root)
+    assert [row[0] for row in db.execute("SELECT relpath FROM entries")] == ["a.md"]
 
 
 def test_bootstrap_empty_deck_no_ops(tmp_path):

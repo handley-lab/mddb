@@ -8,6 +8,7 @@ never imports this module; it is reached only via the ``mcp-mddb`` console
 script.
 """
 
+import base64
 import json
 import re
 from pathlib import Path
@@ -40,18 +41,15 @@ Every response is {{"base": <sha>, "result": <the op payload above>}}, where
 that `base` to the `editor` tool — if another agent committed since you read, the
 edit raises (re-read and retry).
 
-`deck` is the absolute path to an existing mddb root (bootstrap one with the
-editor tool's `init` op); a non-deck path errors rather than reading empty.
-`deck` and blob paths are server-local: any path the server process can
-read/write."""
+`deck` is the absolute path to an existing mddb root; a non-deck path errors
+rather than reading empty. Deck bootstrap is an administrative operation.
+`deck` is server-local and Unix permissions determine which decks this process
+may open. Blob bytes are supplied inline, not read from a server-local path."""
 
 _EDITOR_DESCRIPTION = """Apply operations to an mddb deck. `ops` is a JSON-array
-string. Two modes:
+string.
 
-- Bootstrap: `ops=[{"op":"init"}]` (the sole op) creates a new empty deck at
-  `deck` via MDDB.init, which makes its own bootstrap commit — `rationale` is
-  ignored. Use this once before editing; the deck must not already exist.
-- Edit: any other batch requires an EXISTING deck (a non-deck path errors) with
+- A batch requires an EXISTING deck (a non-deck path errors) with
   the `mddb-card` merge driver registered (else errors — run
   `mddb._merge.install(deck)` + `install_global()`; an unregistered clone would
   silently default-merge and corrupt cards) and runs in one editor block,
@@ -59,7 +57,7 @@ string. Two modes:
   failure during the commit itself propagates and may leave the working tree/cache
   dirty. There is no batch-size cap. Edit operations (dispatched on `op`):
 
-- {"op":"create","title","summary","body"?,"relpath"?,"tags"?,"yaml"?,"blob_path"?,"blob_ext"?}
+- {"op":"create","title","summary","body"?,"relpath"?,"tags"?,"yaml"?,"blob_base64"?,"blob_ext"?}
 - {"op":"update","id","summary","tags"?,"body"?,"yaml"?}   (yaml is shallow-merged)
 - {"op":"delete","id"}
 - {"op":"move","id","new_relpath"}   (new_relpath must end in .md)
@@ -86,9 +84,7 @@ def _resolve_prev(value, results):
 
 def _open(deck):
     if not (Path(deck) / ".git").is_dir():
-        raise ValueError(
-            f"not an mddb deck: {deck} (no git repo; create it with op=init)"
-        )
+        raise ValueError(f"not an mddb deck: {deck} (no git repository)")
     return mddb.MDDB(deck)
 
 
@@ -139,18 +135,17 @@ def _read_result(db, op, id, sql, params):
 @mcp.tool(description=_EDITOR_DESCRIPTION)
 def editor(
     deck: str = Field(..., description="Absolute path to the mddb deck root."),
-    rationale: str = Field(
-        ..., description="Commit message for the batch (ignored for op=init)."
-    ),
+    rationale: str = Field(..., description="Commit message for the batch."),
     ops: str = Field(..., description="JSON array of operation objects."),
     base: str = Field(
         "", description="The `base` from the read whose data you are editing."
     ),
 ):
     parsed = json.loads(ops)
-    if len(parsed) == 1 and parsed[0]["op"] == "init":
-        mddb.MDDB.init(deck)
-        return {"results": [{"op": "init", "deck": deck}]}
+    if any("blob_path" in op for op in parsed):
+        raise ValueError("blob_path is unavailable at the privileged boundary")
+    if any(op.get("op") == "init" for op in parsed):
+        raise ValueError("deck initialization is an administrative operation")
     db = _open(deck)
     require_installed(deck)
     results = []
@@ -163,8 +158,8 @@ def editor(
                     for k in ("body", "relpath", "tags", "yaml", "blob_ext")
                     if k in op
                 }
-                if "blob_path" in op:
-                    kwargs["blob"] = Path(op["blob_path"])
+                if "blob_base64" in op:
+                    kwargs["blob"] = base64.b64decode(op["blob_base64"], validate=True)
                 card = e.create(title=op["title"], summary=op["summary"], **kwargs)
                 results.append({"op": "create", "id": card.id})
             elif kind == "update":

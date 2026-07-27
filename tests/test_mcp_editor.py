@@ -1,6 +1,5 @@
 import json
-import os
-import tempfile
+import base64
 
 import pytest
 
@@ -208,60 +207,57 @@ async def test_editor_requires_driver_installed(tmp_path, monkeypatch):
     assert "driver" in message or "install" in message
 
 
-async def test_init_creates_deck(tmp_path):
+async def test_init_is_rejected(tmp_path):
     new_deck = str(tmp_path / "fresh")
-    out = await _edit(new_deck, "ignored for init", [{"op": "init"}])
-    assert out["results"][0]["op"] == "init"
-    assert (tmp_path / "fresh" / ".git").is_dir()
-    install(new_deck)
-    created = await _edit(
-        new_deck, "first card", [{"op": "create", "title": "A", "summary": "a"}]
+    with pytest.raises(ToolError):
+        await _edit(new_deck, "ignored for init", [{"op": "init"}])
+    assert not (tmp_path / "fresh").exists()
+
+
+async def test_create_with_blob_base64(db):
+    out = await _edit(
+        str(db.root),
+        "add blob card",
+        [
+            {
+                "op": "create",
+                "title": "Plan",
+                "summary": "floor",
+                "blob_base64": base64.b64encode(b"PNGBYTES").decode(),
+                "blob_ext": ".png",
+            }
+        ],
     )
-    got = _result(
-        await mcp.call_tool(
-            "read", {"deck": new_deck, "op": "get", "id": created["results"][0]["id"]}
-        )
-    )["result"]
-    assert got["yaml"]["title"] == "A"
-
-
-async def test_create_with_blob_path(db):
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-        f.write(b"PNGBYTES")
-        src = f.name
-    try:
-        out = await _edit(
-            str(db.root),
-            "add blob card",
-            [{"op": "create", "title": "Plan", "summary": "floor", "blob_path": src}],
-        )
-    finally:
-        os.unlink(src)
     card = db.read(out["results"][0]["id"])
     assert card.blob.read_bytes() == b"PNGBYTES"
     assert card.blob.name == "plan.png"
 
 
+@pytest.mark.parametrize("kind", ["create", "update"])
+async def test_blob_path_is_rejected_in_every_operation(db, seed, kind):
+    operation = {"op": kind, "blob_path": "/etc/shadow"}
+    if kind == "create":
+        operation |= {"title": "Plan", "summary": "floor"}
+    else:
+        operation |= {"id": seed(title="Plan", summary="floor").id, "summary": "floor"}
+    with pytest.raises(ToolError, match="blob_path"):
+        await _edit(str(db.root), "forbidden path", [operation])
+
+
 async def test_create_blob_ext_override(db):
-    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
-        f.write(b"DATA")
-        src = f.name
-    try:
-        out = await _edit(
-            str(db.root),
-            "add blob card",
-            [
-                {
-                    "op": "create",
-                    "title": "Doc",
-                    "summary": "s",
-                    "blob_path": src,
-                    "blob_ext": ".pdf",
-                }
-            ],
-        )
-    finally:
-        os.unlink(src)
+    out = await _edit(
+        str(db.root),
+        "add blob card",
+        [
+            {
+                "op": "create",
+                "title": "Doc",
+                "summary": "s",
+                "blob_base64": base64.b64encode(b"DATA").decode(),
+                "blob_ext": ".pdf",
+            }
+        ],
+    )
     got = _result(
         await mcp.call_tool(
             "read", {"deck": str(db.root), "op": "get", "id": out["results"][0]["id"]}

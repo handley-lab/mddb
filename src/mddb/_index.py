@@ -70,14 +70,17 @@ def cache_path(root: Path) -> Path:
 def deck_lock(root: Path):
     """Serialise mddb writers (and stale-cache rebuilds) for the deck at ``root``.
 
-    An advisory ``fcntl.flock`` on ``<root>/.git/mddb.lock`` — held across a
+    An advisory ``fcntl.flock`` on the read-only ``<root>/.git`` directory — held across a
     commit's materialise and across a rebuild-on-mismatch. Only mddb processes
     take it, so it never collides with git's own ``index.lock``; the OS releases
     it on process death.
     """
-    with open(root / ".git" / "mddb.lock", "w") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+    fd = os.open(root / ".git", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
         yield
+    finally:
+        os.close(fd)
 
 
 def git_head(conn: sqlite3.Connection) -> str:
@@ -132,6 +135,12 @@ def open_index(root: Path, head: str = "") -> sqlite3.Connection:
         conn = _open_fresh(root, head)
         return conn if conn is not None else _rebuild_at(root, head)
     with deck_lock(root):
+        head = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
         conn = _open_fresh(root, head)
         if conn is not None:
             return conn
@@ -153,17 +162,17 @@ def _open_fresh(root: Path, head: str) -> sqlite3.Connection | None:
 
 
 def _rebuild_at(root: Path, head: str) -> sqlite3.Connection:
-    conn = rebuild_index(root)
+    conn = rebuild_index(root, head)
     if head:
         with conn:
             set_git_head(conn, head)
     return conn
 
 
-def rebuild_index(root: Path) -> sqlite3.Connection:
-    """Delete any existing cache and build a fresh one from the ``.md`` files under ``root``.
+def rebuild_index(root: Path, head: str = "") -> sqlite3.Connection:
+    """Delete the cache and rebuild it from Markdown paths tracked at ``head``.
 
-    Walks the directory in sorted order, parses every card via
+    Enumerates paths from Git in sorted order, parses every card via
     :meth:`Card.from_file`, and inserts an ``entries`` row plus
     ``entry_fields`` rows for each, with ``first_commit`` derived from the
     deck's git history (:func:`first_commits`). Files under ``.git/`` are
@@ -176,8 +185,8 @@ def rebuild_index(root: Path) -> sqlite3.Connection:
         A live ``sqlite3.Connection`` to the new cache.
 
     Raises:
-        ValueError: A ``.md`` file has malformed frontmatter, or a tracked
-            card has no git lineage (an uncommitted file is out of contract).
+        ValueError: A tracked ``.md`` file has malformed frontmatter or no Git
+            lineage.
         sqlite3.IntegrityError: Two cards share the same ``id``.
     """
     db_path = cache_path(root)
@@ -186,10 +195,26 @@ def rebuild_index(root: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA)
-    md_paths = [
-        p for p in sorted(root.rglob("*.md")) if ".git" not in p.relative_to(root).parts
+    if not head:
+        resolved = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
+            capture_output=True,
+            text=True,
+        )
+        head = resolved.stdout.strip() if resolved.returncode == 0 else ""
+    raw_paths = (
+        subprocess.run(
+            ["git", "-C", str(root), "ls-tree", "-r", "-z", "--name-only", head],
+            check=True,
+            capture_output=True,
+        ).stdout
+        if head
+        else b""
+    )
+    relpaths = [
+        os.fsdecode(path) for path in raw_paths.split(b"\0") if path.endswith(b".md")
     ]
-    relpaths = [str(p.relative_to(root)) for p in md_paths]
+    md_paths = [root / relpath for relpath in relpaths]
     lineage = first_commits(root, relpaths)
     blobs_by_stem: dict[Path, dict[str, list[Path]]] = {}
     for parent in {p.parent for p in md_paths}:

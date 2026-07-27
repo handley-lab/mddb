@@ -178,6 +178,55 @@ def test_cache_rebuild(db, seed):
     assert db2.read(card.id).yaml["x"] == 1
 
 
+def test_cache_rebuild_needs_only_read_access_to_deck_lock(db, seed):
+    seed(title="Persistent", summary="s")
+    from mddb._index import cache_path
+
+    db.conn.close()
+    cache_path(db.root).unlink()
+    git_dir = db.root / ".git"
+    git_dir.chmod(0o500)
+    try:
+        assert len(mddb.MDDB(db.root).list()) == 1
+    finally:
+        git_dir.chmod(0o700)
+
+
+def test_cache_rebuild_ignores_untracked_markdown(db):
+    from mddb._index import cache_path
+
+    stray = db.root / "broken.md"
+    stray.write_text("not a card\n")
+    db.conn.close()
+    cache_path(db.root).unlink()
+    assert mddb.MDDB(db.root).list() == []
+
+
+def test_cache_rebuild_captures_head_inside_lock(db, seed, monkeypatch):
+    from contextlib import contextmanager
+
+    from mddb import _index
+
+    seed(title="Before", summary="s")
+    db.conn.close()
+    _index.cache_path(db.root).unlink()
+    real_lock = _index.deck_lock
+
+    @contextmanager
+    def commit_before_lock_yields(root):
+        card = root / "during.md"
+        card.write_text("---\nid: during\ntitle: During\nsummary: s\n---\n")
+        db._git("add", "--", card.name)
+        db._git("commit", "-q", "-m", "commit during lock acquisition")
+        with real_lock(root):
+            yield
+
+    monkeypatch.setattr(_index, "deck_lock", commit_before_lock_yields)
+    reopened = mddb.MDDB(db.root)
+    assert {card["title"] for card in reopened.list()} == {"Before", "During"}
+    assert _index.git_head(reopened.conn) == reopened.head()
+
+
 def test_list_progressive_disclosure(db, seed):
     a = seed(
         title="Fridge",

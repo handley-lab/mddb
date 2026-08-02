@@ -102,18 +102,21 @@ class MDDB:
         return card
 
     def list(self) -> list[dict]:
-        """Return every card's id, title, and summary — the progressive-disclosure summary view.
+        """Return every card's id, title, summary, and kind — the progressive-disclosure summary view.
 
-        Cheap to call: pulls only the three substrate-privileged keys from
-        the SQLite cache (no body, no YAML parse). Use :meth:`read` for the
-        full card once a caller has decided which one to open.
+        Cheap to call: pulls only the substrate-privileged keys from the
+        SQLite cache (no body, no YAML parse). Use :meth:`read` for the full
+        card once a caller has decided which one to open. ``kind`` is here
+        because deciding whether a card is yours to touch is the same kind of
+        question as deciding whether it is worth opening.
 
         Returns:
             A list of ``{"id": str, "title": str | None, "summary": str | None,
-            "blob_relpath": str | None}`` dicts, one per card. ``title`` and
-            ``summary`` come back as ``None`` for cards missing those keys;
-            ``blob_relpath`` is the relpath of the card's binary blob (see
-            :attr:`Card.blob`), or ``None`` when it has none.
+            "kind": str | None, "blob_relpath": str | None}`` dicts, one per
+            card. ``title`` and ``summary`` come back as ``None`` for cards
+            missing those keys; ``kind`` is ``None`` when no layer owns the
+            card; ``blob_relpath`` is the relpath of the card's binary blob
+            (see :attr:`Card.blob`), or ``None`` when it has none.
         """
         return _index.list_progressive(self.conn)
 
@@ -455,6 +458,7 @@ class _Editor:
         yaml: dict | None = None,
         body: str = "",
         relpath: str = "",
+        kind: str | None = None,
         tags: Sequence[str] | None = None,
         blob: Path | bytes | None = None,
         blob_ext: str = "",
@@ -462,8 +466,12 @@ class _Editor:
         """Stage a new card for creation. Materialises on clean ``__exit__``.
 
         On-disk YAML keys are written in canonical order: ``id``, ``title``,
-        ``summary``, ``tags`` (when present), then the caller's remaining
-        ``yaml=`` keys in their original relative order.
+        ``summary``, ``kind`` and ``tags`` (when present), then the caller's
+        remaining ``yaml=`` keys in their original relative order.
+
+        ``kind`` names the vocabulary whose verbs own the card. ``None``
+        (default) leaves any ``yaml["kind"]`` untouched; a string wins over it.
+        A card created without a kind is inert — no layer's verbs claim it.
 
         ``tags`` is a three-state kwarg:
             - ``None`` (default): no override. Caller's ``yaml["tags"]`` is
@@ -505,6 +513,12 @@ class _Editor:
             yaml_d["id"] = str(uuid.uuid4())
         yaml_d["title"] = title
         yaml_d["summary"] = summary
+        if kind is None:
+            if "kind" in caller_yaml:
+                yaml_d["kind"] = caller_yaml.pop("kind")
+        else:
+            yaml_d["kind"] = kind
+            caller_yaml.pop("kind", None)
         if tags is None:
             if "tags" in caller_yaml:
                 yaml_d["tags"] = caller_yaml.pop("tags")

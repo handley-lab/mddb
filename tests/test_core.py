@@ -504,3 +504,46 @@ def test_kind_change_is_reindexed(db, seed):
     assert reopened.conn.execute(
         "SELECT kind FROM entries WHERE id = ?", (card.id,)
     ).fetchone() == ("project",)
+
+
+def test_at_reads_the_bytes_pinned_at_a_commit(db, seed):
+    card = seed(title="Merge?", summary="12 files", body="original\n")
+    pinned = db.head()
+    with db.editor(rationale="tamper after display") as editor:
+        fresh = editor.read(card.id)
+        fresh.body = "rewritten\n"
+        editor.update(fresh, summary=fresh.summary)
+    reopened = mddb.MDDB(db.root)
+    assert reopened.read(card.id).body == "rewritten\n"
+    assert reopened.at(card.id, pinned).body == "original\n"
+
+
+def test_at_survives_a_move(db, seed):
+    card = seed(title="Movable", summary="")
+    pinned = db.head()
+    with db.editor(rationale="file it elsewhere") as editor:
+        editor.move(card.id, "elsewhere/movable.md")
+    reopened = mddb.MDDB(db.root)
+    assert reopened.at(card.id, pinned).id == card.id
+
+
+def test_at_finds_a_card_deleted_since(db, seed):
+    card = seed(title="Doomed", summary="", body="still here\n")
+    pinned = db.head()
+    with db.editor(rationale="delete") as editor:
+        editor.delete(card.id)
+    reopened = mddb.MDDB(db.root)
+    assert reopened.at(card.id, pinned).body == "still here\n"
+
+
+def test_at_raises_for_a_card_absent_at_that_commit(db, seed):
+    seed(title="First", summary="")
+    early = db.head()
+    later = seed(title="Second", summary="")
+    with pytest.raises(KeyError):
+        mddb.MDDB(db.root).at(later.id, early)
+
+
+def test_at_blob_is_unset(db, seed):
+    card = seed(title="Pinned", summary="")
+    assert mddb.MDDB(db.root).at(card.id, db.head()).blob is None

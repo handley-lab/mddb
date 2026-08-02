@@ -120,6 +120,64 @@ class MDDB:
         """
         return _index.list_progressive(self.conn)
 
+    def at(self, card_id: str, sha: str) -> Card:
+        """Read a card's content as it existed at a commit.
+
+        The read half of :meth:`history`, which hands out the shas. Resolves
+        ``card_id`` inside the pinned tree rather than by path, so a later
+        :meth:`_Editor.move` or delete cannot change which bytes a caller
+        pinned. Callers that must act on exactly the bytes a human approved
+        read them here.
+
+        The card's current relpath is tried first and accepted only when the
+        bytes there carry ``card_id``; otherwise the commit's tree is searched.
+
+        Args:
+            card_id: The card's ``id``.
+            sha: The commit whose bytes to read.
+
+        Returns:
+            The `Card` parsed from the bytes at ``sha``, with ``blob`` unset
+            (a pinned tree has no filesystem location).
+
+        Raises:
+            KeyError: No card with that ``id`` exists at ``sha``.
+            subprocess.CalledProcessError: A git command failed.
+        """
+        candidate = (
+            _index.relpath_of(self.conn, card_id) if self._known(card_id) else ""
+        )
+        if candidate:
+            found = self._card_at(sha, candidate)
+            if found is not None and found.id == card_id:
+                return found
+        for relpath in self._md_paths(sha):
+            found = self._card_at(sha, relpath)
+            if found is not None and found.id == card_id:
+                return found
+        raise KeyError(card_id)
+
+    def _known(self, card_id: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM entries WHERE id = ?", (card_id,)
+        ).fetchone()
+        return row is not None
+
+    def _md_paths(self, sha: str) -> list[str]:
+        out = self._git("ls-tree", "-r", "-z", "--name-only", sha).stdout
+        return [p for p in out.split("\0") if p.endswith(".md")]
+
+    def _card_at(self, sha: str, relpath: str) -> Card | None:
+        shown = subprocess.run(
+            ["git", "show", f"{sha}:{relpath}"],
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+        )
+        if shown.returncode != 0:
+            return None
+        return Card.from_text(shown.stdout)
+
     def history(self, card_id: str) -> list[dict]:
         """Return the commit history of a card, newest first.
 

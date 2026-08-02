@@ -5,8 +5,9 @@ unsupported or obsolete claim. Incorrect documentation is worst.
 
 MDDB is a Python substrate for YAML-frontmatter Markdown cards. Cards and Git
 history are authoritative; a rebuildable SQLite index provides structured and
-full-text queries. The substrate knows only `id`, `title`, `summary`, `relpath`,
-and `tags`. Domain fields and policy belong in callers.
+full-text queries. The substrate knows only `id`, `title`, `summary`, `kind`,
+`relpath`, and `tags`. Domain fields and policy belong in callers; `kind` names
+which caller's vocabulary owns a card, and mddb never interprets its values.
 
 ```python
 import mddb

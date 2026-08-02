@@ -241,12 +241,14 @@ def test_list_progressive_disclosure(db, seed):
             "id": a.id,
             "title": "Fridge",
             "summary": "What's in the fridge.",
+            "kind": None,
             "blob_relpath": None,
         },
         {
             "id": b.id,
             "title": "Shed",
             "summary": "Tools and equipment.",
+            "kind": None,
             "blob_relpath": None,
         },
     ]
@@ -440,3 +442,65 @@ def test_incremental_deck_gets_planner_statistics_without_rebuild(tmp_path):
     with db.editor(rationale="first card on a never-rebuilt deck") as e:
         e.create(title="Fresh", summary="s", yaml={"kind": "x"})
     assert db.conn.execute("SELECT count(*) FROM sqlite_stat1").fetchone()[0] > 0
+
+
+def test_kind_is_written_indexed_and_disclosed(db, seed):
+    card = seed(title="Standup", summary="Daily standup.", kind="event")
+    assert db.read(card.id).kind == "event"
+    assert [e["kind"] for e in db.list()] == ["event"]
+    assert db.conn.execute(
+        "SELECT kind FROM entries WHERE id = ?", (card.id,)
+    ).fetchone() == ("event",)
+    assert (
+        db.conn.execute(
+            "SELECT count(*) FROM entry_fields WHERE key = 'kind'"
+        ).fetchone()[0]
+        == 0
+    )
+
+
+def test_kind_absent_is_none_not_an_error(db, seed):
+    card = seed(title="Anomaly detection", summary="")
+    assert db.read(card.id).kind is None
+    assert "kind" not in db.read(card.id).yaml
+    assert db.list()[0]["kind"] is None
+
+
+def test_kind_kwarg_wins_over_yaml_and_orders_after_summary(db, seed):
+    card = seed(
+        title="Merge the rename?",
+        summary="12 files.",
+        kind="judgement",
+        yaml={"kind": "task", "producer": "fleet:$12"},
+    )
+    assert list(db.read(card.id).yaml) == [
+        "id",
+        "title",
+        "summary",
+        "kind",
+        "producer",
+    ]
+    assert db.read(card.id).kind == "judgement"
+
+
+def test_kind_survives_update(db, seed):
+    card = seed(title="Standup", summary="Daily standup.", kind="event")
+    with db.editor(rationale="retitle") as editor:
+        fresh = editor.read(card.id)
+        fresh.yaml["title"] = "Standup (moved)"
+        editor.update(fresh, summary=fresh.summary)
+    reopened = mddb.MDDB(db.root)
+    assert reopened.read(card.id).kind == "event"
+    assert reopened.list()[0]["kind"] == "event"
+
+
+def test_kind_change_is_reindexed(db, seed):
+    card = seed(title="Thing", summary="", kind="task")
+    with db.editor(rationale="reclassify") as editor:
+        fresh = editor.read(card.id)
+        fresh.yaml["kind"] = "project"
+        editor.update(fresh, summary=fresh.summary)
+    reopened = mddb.MDDB(db.root)
+    assert reopened.conn.execute(
+        "SELECT kind FROM entries WHERE id = ?", (card.id,)
+    ).fetchone() == ("project",)

@@ -34,16 +34,22 @@ work. `base` protects the whole deck against concurrent MDDB commits and raises
 do not take the MDDB lock.
 
 `Card` is an ordinary object with mutable `yaml` and `body`, plus a derived
-`blob: Path | None`. Its `id`, `title`, `summary`, and `tags` properties read
-frontmatter directly. Untagged cards may omit `tags`.
+`blob: Path | None`. Its `id`, `title`, `summary`, `kind`, and `tags` properties
+read frontmatter directly. Untagged cards may omit `tags`. `kind` names the
+vocabulary whose verbs own the card and returns `None` when absent — a card no
+layer owns is inert.
 
 The index schema is authoritative in `src/mddb/schema.sql`. `mddb.SCHEMA_DOC`
 documents the query surface. Expose `db.conn`; do not add a filter or search DSL.
 
 ## Invariants
 
-- The substrate filing vocabulary is `id`, `title`, `summary`, `relpath`, and
-  `tags`. Do not add domain fields such as status or due dates.
+- The substrate filing vocabulary is `id`, `title`, `summary`, `kind`,
+  `relpath`, and `tags`. Do not add domain fields such as status or due dates.
+  A key is filing vocabulary only when the substrate must answer it without
+  interpreting the card: which card, where it is, whether it is worth opening,
+  and which vocabulary owns it. `kind` carries no state within a domain — its
+  values are named by callers and mddb never interprets them.
 - Opening never creates. `MDDB.init` is the explicit bootstrap operation.
 - Mutation order is filesystem, Git, then SQLite. A stale or schema-mismatched
   cache rebuilds from the locked Git HEAD.

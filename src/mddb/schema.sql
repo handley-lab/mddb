@@ -6,6 +6,7 @@ CREATE TABLE entries(
     relpath TEXT UNIQUE NOT NULL,
     title TEXT,
     summary TEXT,
+    kind TEXT,
     blob_relpath TEXT,
     first_commit TEXT NOT NULL,
     yaml_text TEXT NOT NULL,

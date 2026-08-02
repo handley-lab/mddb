@@ -22,13 +22,17 @@ class Card:
     Mutate ``yaml`` or ``body`` in place and pass the card to
     :meth:`_Editor.update` (inside an :meth:`MDDB.editor` block) to persist.
 
-    The substrate filing keys are ``id``, ``title``, ``summary``, and ``tags``.
-    The :attr:`id`, :attr:`title`, :attr:`summary`, and :attr:`tags` properties
-    access them directly and raise ``KeyError`` if missing. ``title`` and
-    ``summary`` are written by ``editor.create`` unconditionally — a missing
+    The substrate filing keys are ``id``, ``title``, ``summary``, ``kind``, and
+    ``tags``. The :attr:`id`, :attr:`title`, :attr:`summary`, and :attr:`tags`
+    properties access them directly and raise ``KeyError`` if missing. ``title``
+    and ``summary`` are written by ``editor.create`` unconditionally — a missing
     key signals drift. ``tags`` is optional — untagged cards routinely omit
     the key, so ``card.tags`` raising is a *normal* signal, not drift.
     Callers who treat tags as optional use ``card.yaml.get("tags", [])``.
+
+    :attr:`kind` names the vocabulary whose verbs own the card. Absence is a
+    real state rather than drift — a card no layer owns is inert, and nothing
+    mutates it — so :attr:`kind` returns ``None`` instead of raising.
 
     A card may have a **blob**: one binary file sharing its filename stem
     (``floorplan.md`` + ``floorplan.png``). :attr:`blob` is the absolute path
@@ -41,8 +45,8 @@ class Card:
 
     Attributes:
         yaml: Frontmatter as a Python dict. Must contain ``"id"``;
-            ``"title"`` and ``"summary"`` are strongly expected; ``"tags"``
-            may be absent.
+            ``"title"`` and ``"summary"`` are strongly expected; ``"kind"``
+            and ``"tags"`` may be absent.
         body: Markdown body text.
         blob: Absolute path to the card's binary blob, or ``None``. Stamped
             by :meth:`MDDB.read`; not serialised; not part of equality.
@@ -66,6 +70,11 @@ class Card:
     def summary(self) -> str:
         """Return the card's summary (substrate filing key, progressive disclosure)."""
         return self.yaml["summary"]
+
+    @property
+    def kind(self) -> str | None:
+        """Return the vocabulary owning this card, or ``None`` when no layer owns it."""
+        return self.yaml.get("kind")
 
     @property
     def tags(self) -> list:

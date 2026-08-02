@@ -15,12 +15,14 @@ import yaml
 
 from .card import Card
 
-SCHEMA_VERSION = "6"
+SCHEMA_VERSION = "7"
 _SCHEMA = (Path(__file__).parent / "schema.sql").read_text()
 
 SCHEMA_DOC = """\
-entries(rowid, id, relpath, title, summary, blob_relpath, first_commit, yaml_text, body)
-  one row per card. id/relpath UNIQUE NOT NULL; title/summary/blob_relpath nullable.
+entries(rowid, id, relpath, title, summary, kind, blob_relpath, first_commit, yaml_text, body)
+  one row per card. id/relpath UNIQUE NOT NULL; title/summary/kind/blob_relpath
+  nullable. kind names the vocabulary whose verbs own the card; NULL means no
+  layer owns it.
   first_commit is the author date of the first commit in the card's surviving
   lineage (renames followed), canonical UTC ISO 'YYYY-MM-DDTHH:MM:SS+00:00' —
   lexicographic order is chronological order. Derived from the deck's git
@@ -28,7 +30,7 @@ entries(rowid, id, relpath, title, summary, blob_relpath, first_commit, yaml_tex
   yaml_text is the serialised frontmatter; body is the markdown body.
 entry_fields(entry_rowid -> entries.rowid, key, value_str, value_num)
   one row per top-level scalar (and per item of a list-of-scalars) in a card's
-  yaml, EXCEPT title/summary (those are columns on entries). Numeric values also
+  yaml, EXCEPT title/summary/kind (those are columns on entries). Numeric values also
   land in value_num. This is where tags live (key='tags', one row per tag).
 entries_fts(yaml_text, body)
   FTS5 full-text index over entries; query as:
@@ -443,13 +445,14 @@ def insert(
     has none (a real state, not an omitted argument).
     """
     cur = conn.execute(
-        "INSERT INTO entries(id, relpath, title, summary, blob_relpath, first_commit, yaml_text, body) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO entries(id, relpath, title, summary, kind, blob_relpath, first_commit, yaml_text, body) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             card.id,
             relpath,
             card.yaml.get("title"),
             card.yaml.get("summary"),
+            card.yaml.get("kind"),
             blob_relpath,
             first_commit,
             _yaml_text(card),
@@ -460,16 +463,17 @@ def insert(
 
 
 def update_content(conn: sqlite3.Connection, card: Card) -> None:
-    """Refresh title/summary/yaml_text/body and rebuild entry_fields for ``card``."""
+    """Refresh title/summary/kind/yaml_text/body and rebuild entry_fields for ``card``."""
     rowid = conn.execute(
         "SELECT rowid FROM entries WHERE id = ?", (card.id,)
     ).fetchone()[0]
     conn.execute(
-        "UPDATE entries SET title = ?, summary = ?, yaml_text = ?, body = ? "
+        "UPDATE entries SET title = ?, summary = ?, kind = ?, yaml_text = ?, body = ? "
         "WHERE rowid = ?",
         (
             card.yaml.get("title"),
             card.yaml.get("summary"),
+            card.yaml.get("kind"),
             _yaml_text(card),
             card.body,
             rowid,
@@ -500,13 +504,19 @@ def delete(conn: sqlite3.Connection, card_id: str) -> None:
 
 
 def list_progressive(conn: sqlite3.Connection) -> list[dict]:
-    """Return ``[{id, title, summary, blob_relpath}, ...]`` for every cached card."""
+    """Return ``[{id, title, summary, kind, blob_relpath}, ...]`` for every cached card."""
     rows = conn.execute(
-        "SELECT id, title, summary, blob_relpath FROM entries"
+        "SELECT id, title, summary, kind, blob_relpath FROM entries"
     ).fetchall()
     return [
-        {"id": cid, "title": title, "summary": summary, "blob_relpath": blob_relpath}
-        for cid, title, summary, blob_relpath in rows
+        {
+            "id": cid,
+            "title": title,
+            "summary": summary,
+            "kind": kind,
+            "blob_relpath": blob_relpath,
+        }
+        for cid, title, summary, kind, blob_relpath in rows
     ]
 
 
@@ -529,7 +539,7 @@ def index_fields(conn: sqlite3.Connection, rowid: int, data: dict) -> None:
     """
     rows = []
     for key, value in data.items():
-        if key in ("title", "summary"):
+        if key in ("title", "summary", "kind"):
             continue
         if isinstance(value, dict):
             continue

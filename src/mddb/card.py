@@ -10,13 +10,7 @@ from pathlib import Path
 import yaml
 
 _LOADER = yaml.CSafeLoader
-"""The libyaml C SafeLoader for the parse hot path.
-
-Identical parse semantics to ``SafeLoader``, ~9x faster (a 10k-card rebuild's
-parse drops 5.2s → 0.6s). A hard reference, not a ``getattr`` fallback to the
-pure-Python loader: if libyaml is missing ``yaml.CSafeLoader`` raises at import,
-so the fast path failing is loud — never a silent 9x-slower degrade.
-"""
+"""Require libyaml's safe loader so rebuild performance cannot degrade silently."""
 
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n(.*)", re.DOTALL)
 

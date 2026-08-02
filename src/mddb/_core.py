@@ -144,18 +144,60 @@ class MDDB:
             KeyError: No card with that ``id`` exists at ``sha``.
             subprocess.CalledProcessError: A git command failed.
         """
+        relpath = self._relpath_at(card_id, sha)
+        found = self._card_at(sha, relpath)
+        if found is None:
+            raise KeyError(card_id)
+        return found
+
+    def blob_at(self, card_id: str, sha: str) -> bytes | None:
+        """Read a card's blob as it existed at a commit, or ``None`` if it had none.
+
+        The blob half of :meth:`at`. A card's blob is the tracked sibling
+        sharing its stem, so it is resolved from the card's path inside the
+        pinned tree rather than from disk.
+
+        Args:
+            card_id: The card's ``id``.
+            sha: The commit whose bytes to read.
+
+        Returns:
+            The blob's bytes at ``sha``, or ``None`` when the card had no
+            tracked sibling there.
+
+        Raises:
+            KeyError: No card with that ``id`` exists at ``sha``.
+        """
+        relpath = self._relpath_at(card_id, sha)
+        stem = relpath[: -len(".md")]
+        for sibling in self._paths(sha):
+            if sibling != relpath and sibling.startswith(stem + "."):
+                shown = subprocess.run(
+                    ["git", "show", f"{sha}:{sibling}"],
+                    cwd=self.root,
+                    capture_output=True,
+                )
+                if shown.returncode == 0:
+                    return shown.stdout
+        return None
+
+    def _relpath_at(self, card_id: str, sha: str) -> str:
         candidate = (
             _index.relpath_of(self.conn, card_id) if self._known(card_id) else ""
         )
         if candidate:
             found = self._card_at(sha, candidate)
             if found is not None and found.id == card_id:
-                return found
+                return candidate
         for relpath in self._md_paths(sha):
             found = self._card_at(sha, relpath)
             if found is not None and found.id == card_id:
-                return found
+                return relpath
         raise KeyError(card_id)
+
+    def _paths(self, sha: str) -> list[str]:
+        out = self._git("ls-tree", "-r", "-z", "--name-only", sha).stdout
+        return [p for p in out.split("\0") if p]
 
     def _known(self, card_id: str) -> bool:
         row = self.conn.execute(
@@ -164,8 +206,7 @@ class MDDB:
         return row is not None
 
     def _md_paths(self, sha: str) -> list[str]:
-        out = self._git("ls-tree", "-r", "-z", "--name-only", sha).stdout
-        return [p for p in out.split("\0") if p.endswith(".md")]
+        return [p for p in self._paths(sha) if p.endswith(".md")]
 
     def _card_at(self, sha: str, relpath: str) -> Card | None:
         shown = subprocess.run(

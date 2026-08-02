@@ -547,3 +547,17 @@ def test_at_raises_for_a_card_absent_at_that_commit(db, seed):
 def test_at_blob_is_unset(db, seed):
     card = seed(title="Pinned", summary="")
     assert mddb.MDDB(db.root).at(card.id, db.head()).blob is None
+
+
+def test_blob_at_reads_the_blob_pinned_at_a_commit(db, seed):
+    card = seed(title="Scan", summary="", blob=b"original bytes", blob_ext=".bin")
+    pinned = db.head()
+    with db.editor(rationale="replace the blob") as editor:
+        editor.delete(card.id)
+    reopened = mddb.MDDB(db.root)
+    assert reopened.blob_at(card.id, pinned) == b"original bytes"
+
+
+def test_blob_at_is_none_without_one(db, seed):
+    card = seed(title="No blob", summary="")
+    assert mddb.MDDB(db.root).blob_at(card.id, db.head()) is None

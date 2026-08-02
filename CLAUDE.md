@@ -16,6 +16,7 @@ db.read(card_id)                  # Card
 db.list()                         # progressive-disclosure mappings
 db.history(card_id)               # Git history mappings
 db.at(card_id, sha)               # the card's bytes at a commit
+db.blob_at(card_id, sha)          # its blob's bytes there, or None
 db.head()                         # current deck HEAD
 db.conn                           # sqlite3.Connection for composed SQL
 

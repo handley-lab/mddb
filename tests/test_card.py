@@ -23,21 +23,10 @@ def test_roundtrip():
     assert parsed.body == "hello\n"
 
 
-def test_card_tags_returns_list_when_present():
-    card = Card(yaml={"id": "x", "tags": ["area/work", "topic/cosmology"]})
-    assert card.tags == ["area/work", "topic/cosmology"]
-
-
-def test_card_tags_raises_keyerror_when_absent():
-    card = Card(yaml={"id": "x"})
-    with pytest.raises(KeyError):
-        _ = card.tags
-
-
-def test_card_tags_returns_mutable_backing_list():
-    card = Card(yaml={"id": "x", "tags": []})
-    card.tags.append("shed")
-    assert card.yaml["tags"] == ["shed"]
+def test_card_tags_are_read_as_an_ordinary_field():
+    assert Card(yaml={"id": "x", "tags": ["area/work"]}).yaml["tags"] == ["area/work"]
+    assert Card(yaml={"id": "x"}).yaml.get("tags", []) == []
+    assert not hasattr(Card(yaml={"id": "x", "tags": []}), "tags")
 
 
 def test_card_from_text_malformed_frontmatter_raises_valueerror():

@@ -23,12 +23,14 @@ class Card:
     :meth:`_Editor.update` (inside an :meth:`MDDB.editor` block) to persist.
 
     The substrate filing keys are ``id``, ``title``, ``summary``, ``kind``, and
-    ``tags``. The :attr:`id`, :attr:`title`, :attr:`summary`, and :attr:`tags`
-    properties access them directly and raise ``KeyError`` if missing. ``title``
-    and ``summary`` are written by ``editor.create`` unconditionally — a missing
-    key signals drift. ``tags`` is optional — untagged cards routinely omit
-    the key, so ``card.tags`` raising is a *normal* signal, not drift.
-    Callers who treat tags as optional use ``card.yaml.get("tags", [])``.
+    ``tags``. The :attr:`id`, :attr:`title`, and :attr:`summary` properties
+    access them directly and raise ``KeyError`` if missing — those three are
+    written by ``editor.create`` unconditionally, so a missing key signals
+    drift. ``tags`` has no accessor: which domain a card belongs to is a
+    question layers ask and the substrate never does, so it is read like any
+    other field with ``card.yaml.get("tags", [])``. It stays filing vocabulary
+    because ``editor.create`` orders it canonically and the merge driver
+    set-merges it.
 
     :attr:`kind` names the vocabulary whose verbs own the card. Absence is a
     real state rather than drift — a card no layer owns is inert, and nothing
@@ -75,15 +77,6 @@ class Card:
     def kind(self) -> str | None:
         """Return the vocabulary owning this card, or ``None`` when no layer owns it."""
         return self.yaml.get("kind")
-
-    @property
-    def tags(self) -> list:
-        """Return the card's tags (substrate filing key).
-
-        Raises ``KeyError`` for untagged cards. Use ``card.yaml.get("tags", [])``
-        if absence should be treated as the empty list.
-        """
-        return self.yaml["tags"]
 
     def copy(self) -> Card:
         """Return a deep copy of this card.

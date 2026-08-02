@@ -36,10 +36,11 @@ work. `base` protects the whole deck against concurrent MDDB commits and raises
 do not take the MDDB lock.
 
 `Card` is an ordinary object with mutable `yaml` and `body`, plus a derived
-`blob: Path | None`. Its `id`, `title`, `summary`, `kind`, and `tags` properties
-read frontmatter directly. Untagged cards may omit `tags`. `kind` names the
-vocabulary whose verbs own the card and returns `None` when absent — a card no
-layer owns is inert.
+`blob: Path | None`. Its `id`, `title`, `summary`, and `kind` properties read
+frontmatter directly. `kind` names the vocabulary whose verbs own the card and
+returns `None` when absent — a card no layer owns is inert. `tags` has no
+accessor: it is filing vocabulary the substrate stores, orders and set-merges
+but never asks, so callers read `card.yaml.get("tags", [])`.
 
 The index schema is authoritative in `src/mddb/schema.sql`. `mddb.SCHEMA_DOC`
 documents the query surface. Expose `db.conn`; do not add a filter or search DSL.

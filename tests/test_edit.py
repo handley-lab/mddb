@@ -424,7 +424,7 @@ def test_edit_create_tags_kwarg_basic(db):
             title="A", summary="A", tags=["area/work", "topic/cosmology"]
         )
     again = db.read(card.id)
-    assert again.tags == ["area/work", "topic/cosmology"]
+    assert again.yaml["tags"] == ["area/work", "topic/cosmology"]
 
 
 def test_edit_create_no_tags_omits_key(db):
@@ -448,7 +448,7 @@ def test_edit_create_empty_list_omits_key(db):
 def test_edit_create_tags_kwarg_wins_over_yaml(db):
     with db.editor(rationale="kwarg wins") as editor:
         card = editor.create(title="A", summary="A", yaml={"tags": ["x"]}, tags=["y"])
-    assert db.read(card.id).tags == ["y"]
+    assert db.read(card.id).yaml["tags"] == ["y"]
 
 
 def test_edit_create_empty_tags_clears_yaml_tags(db):
@@ -460,13 +460,13 @@ def test_edit_create_empty_tags_clears_yaml_tags(db):
 def test_edit_create_none_tags_preserves_yaml_tags(db):
     with db.editor(rationale="preserve yaml") as editor:
         card = editor.create(title="A", summary="A", yaml={"tags": ["x"]}, tags=None)
-    assert db.read(card.id).tags == ["x"]
+    assert db.read(card.id).yaml["tags"] == ["x"]
 
 
 def test_edit_create_omitted_tags_preserves_yaml_tags(db):
     with db.editor(rationale="implicit preserve") as editor:
         card = editor.create(title="A", summary="A", yaml={"tags": ["x"]})
-    assert db.read(card.id).tags == ["x"]
+    assert db.read(card.id).yaml["tags"] == ["x"]
 
 
 def test_edit_create_yaml_empty_tags_preserved(db):
@@ -524,7 +524,7 @@ def test_edit_update_no_tags_kwarg_preserves_existing(db, seed):
     card.body = "changed"
     with db.editor(rationale="no override") as editor:
         editor.update(card, summary=card.summary)
-    assert db.read(card.id).tags == ["original"]
+    assert db.read(card.id).yaml["tags"] == ["original"]
 
 
 def test_edit_update_no_tags_kwarg_when_card_has_no_tags(db, seed):
@@ -539,7 +539,7 @@ def test_edit_update_replaces_tags(db, seed):
     card = seed(title="A", summary="A", tags=["original"])
     with db.editor(rationale="replace") as editor:
         editor.update(card, summary=card.summary, tags=["replacement"])
-    assert db.read(card.id).tags == ["replacement"]
+    assert db.read(card.id).yaml["tags"] == ["replacement"]
 
 
 def test_edit_update_empty_tags_removes_key_on_disk(db, seed):
@@ -577,7 +577,7 @@ def test_edit_update_in_place_mutation_persists(db, seed):
     card.yaml["tags"].append("added")
     with db.editor(rationale="in-place") as editor:
         editor.update(card, summary=card.summary)
-    assert db.read(card.id).tags == ["original", "added"]
+    assert db.read(card.id).yaml["tags"] == ["original", "added"]
 
 
 def test_edit_create_omit_empty_disk_text(db):
@@ -735,7 +735,7 @@ def test_editor_edit_preserves_title_summary_tags(db, seed):
     again = db.read(card.id)
     assert again.title == "A"
     assert again.summary == "A summary"
-    assert again.tags == ["x"]
+    assert again.yaml["tags"] == ["x"]
     assert again.body == "bar"
 
 

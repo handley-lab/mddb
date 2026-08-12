@@ -226,7 +226,7 @@ def test_require_installed_raises_without_driver(tmp_path, monkeypatch):
         require_installed(db.root)
 
 
-def test_conflicted_frontmatter_breaks_reads_and_rebuild(tmp_path):
+def test_uncommitted_conflicted_frontmatter_breaks_reads_not_rebuild(tmp_path):
     db = mddb.MDDB.init(tmp_path / "deck")
     with db.editor(rationale="seed card") as editor:
         card = editor.create(title="Card", summary="base", relpath="card.md")
@@ -240,5 +240,10 @@ def test_conflicted_frontmatter_breaks_reads_and_rebuild(tmp_path):
         Card.from_file(db.root / "card.md")
     with pytest.raises(yaml.YAMLError):
         db.read(card.id)
-    with pytest.raises(yaml.YAMLError):
-        rebuild_index(db.root)
+    rebuilt = rebuild_index(db.root)
+    assert (
+        rebuilt.execute(
+            "SELECT summary FROM entries WHERE id = ?", (card.id,)
+        ).fetchone()[0]
+        == "base"
+    )

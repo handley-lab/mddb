@@ -114,7 +114,7 @@ def analyze(conn: sqlite3.Connection) -> None:
 
 
 def open_index(root: Path, head: str = "") -> sqlite3.Connection:
-    """Open the cache for ``root``, rebuilding it if the schema version or git HEAD drifted.
+    """Open the cache for ``root``, refreshing it if only git HEAD drifted.
 
     The whole decision — fast-path probe and any rebuild (missing cache,
     schema mismatch, git-HEAD mismatch) — runs under :func:`deck_lock`, so a
@@ -134,8 +134,7 @@ def open_index(root: Path, head: str = "") -> sqlite3.Connection:
         A live ``sqlite3.Connection`` with foreign keys enabled.
     """
     if not head:
-        conn = _open_fresh(root, head)
-        return conn if conn is not None else _rebuild_at(root, head)
+        return _rebuild_at(root, head)
     with deck_lock(root):
         head = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
@@ -143,24 +142,58 @@ def open_index(root: Path, head: str = "") -> sqlite3.Connection:
             capture_output=True,
             text=True,
         ).stdout.strip()
-        conn = _open_fresh(root, head)
-        if conn is not None:
+        conn = _open_cache(root)
+        if conn is None:
+            return _rebuild_at(root, head)
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key='schema_version'"
+        ).fetchone()
+        cached_head = git_head(conn)
+        if row and row[0] == SCHEMA_VERSION and cached_head == head:
             return conn
+        if row and row[0] == SCHEMA_VERSION and cached_head:
+            exists = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "rev-parse",
+                    "--verify",
+                    f"{cached_head}^{{commit}}",
+                ],
+                capture_output=True,
+                check=False,
+            )
+            if exists.returncode == 0:
+                ancestor = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(root),
+                        "merge-base",
+                        "--is-ancestor",
+                        cached_head,
+                        head,
+                    ],
+                    capture_output=True,
+                    check=False,
+                )
+                if ancestor.returncode == 0:
+                    return refresh_index(root, conn, cached_head, head)
+                if ancestor.returncode != 1:
+                    ancestor.check_returncode()
+        conn.close()
         return _rebuild_at(root, head)
 
 
-def _open_fresh(root: Path, head: str) -> sqlite3.Connection | None:
-    """The fast path: the existing cache, iff schema and git HEAD both match."""
+def _open_cache(root: Path) -> sqlite3.Connection | None:
+    """Open the existing cache, or return ``None`` when it is absent."""
     db_path = cache_path(root)
     if not db_path.exists():
         return None
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys=ON")
-    row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-    if row and row[0] == SCHEMA_VERSION and (not head or git_head(conn) == head):
-        return conn
-    conn.close()
-    return None
+    return conn
 
 
 def _rebuild_at(root: Path, head: str) -> sqlite3.Connection:
@@ -174,8 +207,8 @@ def _rebuild_at(root: Path, head: str) -> sqlite3.Connection:
 def rebuild_index(root: Path, head: str = "") -> sqlite3.Connection:
     """Delete the cache and rebuild it from Markdown paths tracked at ``head``.
 
-    Enumerates paths from Git in sorted order, parses every card via
-    :meth:`Card.from_file`, and inserts an ``entries`` row plus
+    Enumerates paths and reads card bytes from the captured Git commit, then
+    inserts an ``entries`` row plus
     ``entry_fields`` rows for each, with ``first_commit`` derived from the
     deck's git history (:func:`first_commits`). Files under ``.git/`` are
     skipped.
@@ -202,51 +235,169 @@ def rebuild_index(root: Path, head: str = "") -> sqlite3.Connection:
             ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
             capture_output=True,
             text=True,
+            check=False,
         )
         head = resolved.stdout.strip() if resolved.returncode == 0 else ""
-    raw_paths = (
-        subprocess.run(
-            ["git", "-C", str(root), "ls-tree", "-r", "-z", "--name-only", head],
-            check=True,
-            capture_output=True,
-        ).stdout
-        if head
-        else b""
-    )
-    relpaths = [
-        os.fsdecode(path) for path in raw_paths.split(b"\0") if path.endswith(b".md")
-    ]
-    md_paths = [root / relpath for relpath in relpaths]
-    lineage = first_commits(root, relpaths)
-    blobs_by_stem: dict[Path, dict[str, list[Path]]] = {}
-    for parent in {p.parent for p in md_paths}:
-        stems: dict[str, list[Path]] = {}
-        for sibling in parent.iterdir():
-            if sibling.is_file() and sibling.suffix not in ("", ".md"):
-                stems.setdefault(sibling.stem, []).append(sibling)
-        blobs_by_stem[parent] = stems
+    tree = _tree(root, head) if head else {}
+    relpaths = sorted(path for path in tree if path.endswith(".md"))
+    cards = _cards_from_tree(root, tree, relpaths)
+    lineage = first_commits(root, relpaths, head)
     with conn:
         conn.execute(
             "INSERT INTO meta(key, value) VALUES ('schema_version', ?)",
             (SCHEMA_VERSION,),
         )
-        for md_path, relpath in zip(md_paths, relpaths):
-            hits = blobs_by_stem[md_path.parent].get(md_path.stem, [])
-            if len(hits) > 1:
-                raise ValueError(
-                    f"multiple blobs for {md_path.name}: {sorted(p.name for p in hits)}"
-                )
-            blob = hits[0] if hits else None
-            blob_relpath = str(blob.relative_to(root)) if blob else None
+        for relpath in relpaths:
+            card, blob_relpath = cards[relpath]
             insert(
                 conn,
-                Card.from_file(md_path),
+                card,
                 relpath,
                 lineage[relpath],
                 blob_relpath,
             )
         analyze(conn)
     return conn
+
+
+def refresh_index(
+    root: Path, conn: sqlite3.Connection, cached_head: str, head: str
+) -> sqlite3.Connection:
+    """Refresh a current-schema cache across an ancestor HEAD advance."""
+    changed = _changed_paths(root, cached_head, head)
+    tree = _tree(root, head)
+    cached_paths = {row[0] for row in conn.execute("SELECT relpath FROM entries")}
+    candidates = {
+        path if path.endswith(".md") else str(Path(path).with_suffix(".md"))
+        for path in changed
+        if Path(path).suffix
+    }
+    candidates &= cached_paths | {path for path in tree if path.endswith(".md")}
+    current = sorted(
+        path for path in candidates if path in tree and path.endswith(".md")
+    )
+    cards = _cards_from_tree(root, tree, current)
+    lineage = {path: _first_commit(root, path, head) for path in current}
+    with conn:
+        for relpath in candidates:
+            conn.execute("DELETE FROM entries WHERE relpath = ?", (relpath,))
+        for relpath in current:
+            card, blob_relpath = cards[relpath]
+            insert(conn, card, relpath, lineage[relpath], blob_relpath)
+        analyze(conn)
+        set_git_head(conn, head)
+    return conn
+
+
+def _tree(root: Path, head: str) -> dict[str, str]:
+    """Return ``{tracked path: blob object}`` for ``head``."""
+    raw = subprocess.run(
+        ["git", "-C", str(root), "ls-tree", "-r", "-z", head],
+        check=True,
+        capture_output=True,
+    ).stdout
+    tree = {}
+    for record in raw.split(b"\0"):
+        if not record:
+            continue
+        metadata, path = record.split(b"\t", 1)
+        _mode, kind, oid = metadata.split(b" ")
+        if kind == b"blob":
+            tree[os.fsdecode(path)] = oid.decode()
+    return tree
+
+
+def _cards_from_tree(
+    root: Path, tree: dict[str, str], relpaths: list[str]
+) -> dict[str, tuple[Card, str | None]]:
+    """Read selected cards and their paired-blob paths from one tracked tree."""
+    blobs: dict[tuple[Path, str], list[str]] = {}
+    for path in tree:
+        parsed = Path(path)
+        if parsed.suffix not in ("", ".md"):
+            blobs.setdefault((parsed.parent, parsed.stem), []).append(path)
+    texts = _cat_blobs(root, [(path, tree[path]) for path in relpaths])
+    cards = {}
+    for relpath in relpaths:
+        parsed = Path(relpath)
+        hits = blobs.get((parsed.parent, parsed.stem), [])
+        if len(hits) > 1:
+            raise ValueError(
+                f"multiple blobs for {parsed.name}: {sorted(Path(p).name for p in hits)}"
+            )
+        cards[relpath] = (
+            Card.from_text(texts[relpath].decode()),
+            hits[0] if hits else None,
+        )
+    return cards
+
+
+def _cat_blobs(root: Path, objects: list[tuple[str, str]]) -> dict[str, bytes]:
+    """Read blob objects through one ``git cat-file --batch`` process."""
+    if not objects:
+        return {}
+    process = subprocess.Popen(
+        ["git", "-C", str(root), "cat-file", "--batch"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    found = {}
+    try:
+        for relpath, oid in objects:
+            process.stdin.write(f"{oid}\n".encode())
+            process.stdin.flush()
+            header = process.stdout.readline().split()
+            if len(header) != 3 or header[1] != b"blob":
+                raise ValueError(f"unexpected git object header: {header!r}")
+            size = int(header[2])
+            found[relpath] = process.stdout.read(size)
+            if process.stdout.read(1) != b"\n":
+                raise ValueError("unterminated git object")
+        process.stdin.close()
+        if process.wait() != 0:
+            raise subprocess.CalledProcessError(process.returncode, process.args)
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
+    return found
+
+
+def _changed_paths(root: Path, cached_head: str, head: str) -> set[str]:
+    """Return every path changed in commits after ``cached_head`` through ``head``."""
+    log = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "log",
+            "-m",
+            "--name-status",
+            "--no-renames",
+            "-z",
+            "--pretty=format:%x01%H%x00",
+            f"{cached_head}..{head}",
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout
+    paths = set()
+    for chunk in log.split(b"\x01"):
+        tokens = [token for token in chunk.split(b"\0") if token]
+        if not tokens:
+            continue
+        i = 1
+        while i < len(tokens):
+            status = tokens[i].lstrip(b"\n")
+            if status not in (b"A", b"M", b"D"):
+                raise ValueError(
+                    f"unknown git log status token: {os.fsdecode(status)!r}"
+                )
+            paths.add(os.fsdecode(tokens[i + 1]))
+            i += 2
+    return paths
 
 
 def utc_iso(git_date: str) -> str:
@@ -264,7 +415,7 @@ def utc_iso(git_date: str) -> str:
     return datetime.fromisoformat(git_date).astimezone(timezone.utc).isoformat()
 
 
-def first_commits(root: Path, relpaths: list[str]) -> dict[str, str]:
+def first_commits(root: Path, relpaths: list[str], head: str = "") -> dict[str, str]:
     """Return each relpath's lineage-origin author date, canonical UTC ISO.
 
     Lineage follows **renames, not copies**: a card copied-and-edited from
@@ -302,13 +453,16 @@ def first_commits(root: Path, relpaths: list[str]) -> dict[str, str]:
     """
     if not (root / ".git").is_dir():
         return {}
-    head = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
-    )
-    if head.returncode != 0:
-        return {}
+    if not head:
+        resolved = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if resolved.returncode != 0:
+            return {}
+        head = resolved.stdout.strip()
     log = subprocess.run(
         [
             "git",
@@ -321,6 +475,7 @@ def first_commits(root: Path, relpaths: list[str]) -> dict[str, str]:
             "-M",
             "-z",
             "--pretty=format:%x01%H%x00%aI%x00",
+            head,
         ],
         capture_output=True,
         text=True,
@@ -360,26 +515,32 @@ def first_commits(root: Path, relpaths: list[str]) -> dict[str, str]:
         if relpath in origin:
             lineage[relpath] = utc_iso(origin[relpath])
             continue
-        follow = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(root),
-                "log",
-                "--follow",
-                "--diff-filter=A",
-                "--format=%aI",
-                "--",
-                relpath,
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.split()
-        if not follow:
-            raise ValueError(f"no git lineage for {relpath}")
-        lineage[relpath] = utc_iso(follow[0])
+        lineage[relpath] = _first_commit(root, relpath, head)
     return lineage
+
+
+def _first_commit(root: Path, relpath: str, head: str) -> str:
+    """Return one path's surviving-lineage origin at the captured commit."""
+    follow = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "log",
+            "--follow",
+            "--diff-filter=A",
+            "--format=%aI",
+            head,
+            "--",
+            relpath,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    if not follow:
+        raise ValueError(f"no git lineage for {relpath}")
+    return utc_iso(follow[0])
 
 
 def relpath_of(conn: sqlite3.Connection, card_id: str) -> str:

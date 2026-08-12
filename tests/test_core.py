@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 
 import pytest
@@ -227,6 +228,252 @@ def test_cache_rebuild_captures_head_inside_lock(db, seed, monkeypatch):
     assert _index.git_head(reopened.conn) == reopened.head()
 
 
+def _external_commit(db, message="external commit", date=""):
+    env = os.environ | (
+        {"GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date} if date else {}
+    )
+    subprocess.run(["git", "-C", str(db.root), "add", "-A"], check=True, env=env)
+    subprocess.run(
+        ["git", "-C", str(db.root), "commit", "-q", "-m", message],
+        check=True,
+        env=env,
+    )
+
+
+def _card_text(card_id, title="Card", summary="s", body=""):
+    return f"---\nid: {card_id}\ntitle: {title}\nsummary: {summary}\n---\n{body}"
+
+
+def _reopen_without_rebuild(db, monkeypatch):
+    from mddb import _index
+
+    db.conn.close()
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("full rebuild used for an ancestor HEAD advance")
+
+    monkeypatch.setattr(_index, "rebuild_index", unexpected)
+    return mddb.MDDB(db.root)
+
+
+def test_stale_cache_refreshes_external_add_modify_delete_and_rename(
+    db, seed, monkeypatch
+):
+    kept = seed(title="Kept", summary="before", relpath="kept.md")
+    deleted = seed(title="Deleted", summary="gone", relpath="deleted.md")
+    (db.root / "added.md").write_text(_card_text("added", title="Added"))
+    (db.root / "kept.md").write_text(_card_text(kept.id, title="Kept", summary="after"))
+    (db.root / "deleted.md").unlink()
+    db._git("mv", "kept.md", "renamed.md")
+    _external_commit(db)
+
+    refreshed = _reopen_without_rebuild(db, monkeypatch)
+    rows = {
+        row[0]: row
+        for row in refreshed.conn.execute("SELECT id, relpath, summary FROM entries")
+    }
+    assert rows[kept.id][1:] == ("renamed.md", "after")
+    assert rows["added"][1] == "added.md"
+    assert deleted.id not in rows
+
+
+def test_stale_cache_refreshes_id_replacement_at_same_path(db, seed, monkeypatch):
+    old = seed(title="Old", summary="s", relpath="same.md")
+    (db.root / "same.md").write_text(_card_text("new", title="New"))
+    _external_commit(db)
+    refreshed = _reopen_without_rebuild(db, monkeypatch)
+    assert {row["id"] for row in refreshed.list()} == {"new"}
+    assert old.id != "new"
+
+
+def test_stale_cache_refreshes_paired_blob_add_delete_and_move(db, seed, monkeypatch):
+    first = seed(title="First", summary="s", relpath="first.md")
+    second = seed(title="Second", summary="s", relpath="second.md")
+    (db.root / "first.pdf").write_bytes(b"first")
+    _external_commit(db, "add blob")
+    refreshed = _reopen_without_rebuild(db, monkeypatch)
+    assert (
+        next(row for row in refreshed.list() if row["id"] == first.id)["blob_relpath"]
+        == "first.pdf"
+    )
+
+    (db.root / "first.pdf").rename(db.root / "second.pdf")
+    _external_commit(refreshed, "move blob")
+    moved = _reopen_without_rebuild(refreshed, monkeypatch)
+    rows = {row["id"]: row["blob_relpath"] for row in moved.list()}
+    assert rows == {first.id: None, second.id: "second.pdf"}
+
+    (db.root / "second.pdf").unlink()
+    _external_commit(moved, "delete blob")
+    removed = _reopen_without_rebuild(moved, monkeypatch)
+    assert all(row["blob_relpath"] is None for row in removed.list())
+
+
+def test_stale_cache_refreshes_across_several_commits(db, seed, monkeypatch):
+    card = seed(title="Card", summary="zero", relpath="card.md")
+    for summary in ("one", "two", "three"):
+        (db.root / "card.md").write_text(_card_text(card.id, summary=summary))
+        _external_commit(db, summary)
+    refreshed = _reopen_without_rebuild(db, monkeypatch)
+    assert (
+        refreshed.conn.execute(
+            "SELECT summary FROM entries WHERE id = ?", (card.id,)
+        ).fetchone()[0]
+        == "three"
+    )
+
+
+def test_refresh_delete_readd_identical_bytes_resets_lineage(db, monkeypatch):
+    original = _card_text("same", title="Same")
+    path = db.root / "same.md"
+    path.write_text(original)
+    _external_commit(db, "first add", "2024-01-01T00:00:00+00:00")
+    db.conn.close()
+    db = mddb.MDDB(db.root)
+    path.unlink()
+    _external_commit(db, "delete", "2025-01-01T00:00:00+00:00")
+    path.write_text(original)
+    _external_commit(db, "second add", "2026-01-01T00:00:00+00:00")
+    refreshed = _reopen_without_rebuild(db, monkeypatch)
+    assert (
+        refreshed.conn.execute(
+            "SELECT first_commit FROM entries WHERE id = 'same'"
+        ).fetchone()[0]
+        == "2026-01-01T00:00:00+00:00"
+    )
+
+
+def test_nonancestor_head_forces_rebuild(db, seed, monkeypatch):
+    from mddb import _index
+
+    seed(title="Old", summary="s")
+    db.conn.close()
+    db._git("checkout", "--orphan", "replacement")
+    for path in db.root.glob("*.md"):
+        path.unlink()
+    (db.root / "new.md").write_text(_card_text("new", title="New"))
+    _external_commit(db, "replacement history")
+    real = _index.rebuild_index
+    calls = []
+
+    def recording(*args, **kwargs):
+        calls.append(True)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(_index, "rebuild_index", recording)
+    reopened = mddb.MDDB(db.root)
+    assert calls == [True]
+    assert {row["id"] for row in reopened.list()} == {"new"}
+
+
+def test_refresh_failure_rolls_back_rows_and_cached_head(db, seed):
+    from mddb import _index
+
+    card = seed(title="Good", summary="s", relpath="card.md")
+    cached_head = _index.git_head(db.conn)
+    (db.root / "card.md").write_text("not a card\n")
+    _external_commit(db, "malformed external card")
+    db.conn.close()
+    with pytest.raises(ValueError, match="malformed frontmatter"):
+        mddb.MDDB(db.root)
+    conn = _index.open_index_readonly(db.root)
+    assert _index.git_head(conn) == cached_head
+    assert conn.execute("SELECT id FROM entries").fetchone()[0] == card.id
+
+
+def test_rebuild_reads_cards_and_blobs_from_captured_commit(db, seed):
+    from mddb import _index
+
+    card = seed(title="Committed", summary="clean", relpath="card.md")
+    (db.root / "card.md").write_text(_card_text(card.id, summary="dirty"))
+    (db.root / "card.pdf").write_bytes(b"untracked")
+    db.conn.close()
+    _index.cache_path(db.root).unlink()
+    rebuilt = mddb.MDDB(db.root)
+    assert rebuilt.conn.execute(
+        "SELECT summary, blob_relpath FROM entries WHERE id = ?", (card.id,)
+    ).fetchone() == ("clean", None)
+
+
+def test_rebuild_rejects_two_tracked_blobs(db, seed):
+    seed(title="Scan", summary="s", relpath="scan.md")
+    (db.root / "scan.pdf").write_bytes(b"a")
+    (db.root / "scan.png").write_bytes(b"b")
+    _external_commit(db, "ambiguous blobs")
+    db.conn.close()
+    cache_path(db.root).unlink()
+    with pytest.raises(ValueError, match="multiple blobs"):
+        mddb.MDDB(db.root)
+
+
+def test_refresh_reads_changed_card_and_blob_membership_from_commit(db, seed):
+    card = seed(title="Committed", summary="before", relpath="card.md")
+    (db.root / "card.md").write_text(_card_text(card.id, summary="committed"))
+    _external_commit(db, "committed update")
+    (db.root / "card.md").write_text(_card_text(card.id, summary="dirty"))
+    (db.root / "card.pdf").write_bytes(b"untracked")
+    db.conn.close()
+    refreshed = mddb.MDDB(db.root)
+    assert refreshed.conn.execute(
+        "SELECT summary, blob_relpath FROM entries WHERE id = ?", (card.id,)
+    ).fetchone() == ("committed", None)
+
+
+def test_refresh_with_unavailable_cached_commit_rebuilds(db, seed, monkeypatch):
+    from mddb import _index
+
+    card = seed(title="Card", summary="s")
+    with db.conn:
+        _index.set_git_head(db.conn, "f" * 40)
+    db.conn.close()
+    real = _index.rebuild_index
+    calls = []
+
+    def recording(*args, **kwargs):
+        calls.append(True)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(_index, "rebuild_index", recording)
+    reopened = mddb.MDDB(db.root)
+    assert calls == [True]
+    assert {row["id"] for row in reopened.list()} == {card.id}
+
+
+def test_refresh_includes_changes_reached_through_a_merge(db, seed, monkeypatch):
+    base = seed(title="Base", summary="before", relpath="base.md")
+    db._git("checkout", "-b", "side")
+    (db.root / "base.md").write_text(_card_text(base.id, summary="from side"))
+    _external_commit(db, "side update")
+    db._git("checkout", "master")
+    (db.root / "main.md").write_text(_card_text("main", title="Main"))
+    _external_commit(db, "main addition")
+    db._git("merge", "--no-edit", "side")
+    refreshed = _reopen_without_rebuild(db, monkeypatch)
+    rows = {
+        row[0]: row[1]
+        for row in refreshed.conn.execute("SELECT id, summary FROM entries")
+    }
+    assert rows == {base.id: "from side", "main": "s"}
+
+
+def test_refreshed_cache_matches_fresh_rebuild(db, seed):
+    from mddb import _index
+
+    card = seed(title="Card", summary="before", relpath="card.md")
+    (db.root / "card.md").write_text(_card_text(card.id, summary="after", body="body"))
+    (db.root / "card.pdf").write_bytes(b"blob")
+    _external_commit(db)
+    db.conn.close()
+    refreshed = mddb.MDDB(db.root)
+    query = "SELECT id, relpath, title, summary, kind, blob_relpath, first_commit, yaml_text, body FROM entries"
+    incremental_rows = refreshed.conn.execute(query).fetchall()
+    refreshed.conn.close()
+    _index.cache_path(db.root).unlink()
+    rebuilt = mddb.MDDB(db.root)
+    assert rebuilt.conn.execute(query).fetchall() == incremental_rows
+    assert rebuilt.conn.execute("SELECT count(*) FROM sqlite_stat1").fetchone()[0] > 0
+
+
 def test_list_progressive_disclosure(db, seed):
     a = seed(
         title="Fridge",
@@ -274,6 +521,26 @@ def test_card_properties_raise_on_missing_keys():
 def test_mddb_init_sets_active_editor_none(tmp_path):
     new_db = mddb.MDDB.init(tmp_path)
     assert new_db._active_editor is None
+
+
+def test_init_at_reused_path_discards_the_former_decks_cache(tmp_path):
+    old = mddb.MDDB.init(tmp_path / "deck")
+    with old.editor(rationale="seed former deck") as editor:
+        editor.create(title="Ghost", summary="must not survive")
+    old.conn.close()
+    shutil.rmtree(old.root / ".git")
+    (old.root / ".gitignore").unlink()
+    for path in old.root.glob("*.md"):
+        path.unlink()
+
+    fresh = mddb.MDDB.init(old.root)
+    assert fresh.list() == []
+    assert (
+        fresh.conn.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()[0]
+        == mddb._index.SCHEMA_VERSION
+    )
 
 
 def test_blob_on_disk_finds_single_blob(tmp_path):
@@ -382,36 +649,26 @@ def test_read_raises_on_two_blobs(db, seed):
 
 
 def test_concurrent_stale_cache_opens_do_not_race(tmp_path):
-    """Regression for issue #22: every rebuild path must hold deck_lock, so
-    concurrent openers of a stale cache never unlink it under each other."""
-    import threading
+    """Concurrent refreshers serialize on the same deck lock."""
+    from concurrent.futures import ThreadPoolExecutor
 
     import mddb as mddb_mod
 
     db = mddb_mod.MDDB.init(tmp_path / "deck")
-    with db.editor(rationale="seed a card for the rebuild race"):
-        pass
-    with db.editor(rationale="move HEAD so every fresh open must rebuild") as e:
-        e.create(title="Racer", summary="s")
-    from mddb import _index
+    with db.editor(rationale="seed a card for the refresh race") as e:
+        card = e.create(title="Racer", summary="before", relpath="racer.md")
+    (db.root / "racer.md").write_text(_card_text(card.id, summary="after"))
+    _external_commit(db)
+    db.conn.close()
 
-    _index.cache_path(db.root).unlink()
+    def opener(_):
+        handle = mddb_mod.MDDB(tmp_path / "deck")
+        return handle.conn.execute(
+            "SELECT summary FROM entries WHERE id = ?", (card.id,)
+        ).fetchone()[0]
 
-    errors = []
-
-    def opener():
-        try:
-            handle = mddb_mod.MDDB(tmp_path / "deck")
-            handle.conn.execute("SELECT COUNT(*) FROM entries").fetchone()
-        except Exception as exc:
-            errors.append(exc)
-
-    threads = [threading.Thread(target=opener) for _ in range(8)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    assert errors == []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert list(pool.map(opener, range(8))) == ["after"] * 8
 
 
 def test_rebuild_leaves_planner_statistics(tmp_path):

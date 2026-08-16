@@ -277,7 +277,7 @@ def refresh_index(
         path for path in candidates if path in tree and path.endswith(".md")
     )
     cards = _cards_from_tree(root, tree, current)
-    lineage = {path: _first_commit(root, path, head) for path in current}
+    lineage = _refresh_lineage(root, conn, cached_head, head, current)
     with conn:
         for relpath in candidates:
             conn.execute("DELETE FROM entries WHERE relpath = ?", (relpath,))
@@ -481,7 +481,52 @@ def first_commits(root: Path, relpaths: list[str], head: str = "") -> dict[str, 
         text=True,
         check=True,
     ).stdout
-    origin: dict[str, str] = {}
+    origin = _replay_lineage(log, {})
+    lineage = {}
+    for relpath in relpaths:
+        if relpath in origin:
+            lineage[relpath] = utc_iso(origin[relpath])
+            continue
+        lineage[relpath] = _first_commit(root, relpath, head)
+    return lineage
+
+
+def _refresh_lineage(
+    root: Path,
+    conn: sqlite3.Connection,
+    cached_head: str,
+    head: str,
+    relpaths: list[str],
+) -> dict[str, str]:
+    origin = dict(conn.execute("SELECT relpath, first_commit FROM entries"))
+    log = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "log",
+            "--topo-order",
+            "--reverse",
+            "--name-status",
+            "-M",
+            "-z",
+            "--pretty=format:%x01%H%x00%aI%x00",
+            f"{cached_head}..{head}",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    origin = _replay_lineage(log, origin)
+    return {
+        relpath: utc_iso(origin[relpath])
+        if relpath in origin
+        else _first_commit(root, relpath, head)
+        for relpath in relpaths
+    }
+
+
+def _replay_lineage(log: str, origin: dict[str, str]) -> dict[str, str]:
     for chunk in log.split("\x01"):
         tokens = [t for t in chunk.split("\x00") if t]
         if not tokens:
@@ -510,13 +555,7 @@ def first_commits(root: Path, relpaths: list[str], head: str = "") -> dict[str, 
                 i += 3
             else:
                 raise ValueError(f"unknown git log status token: {status!r}")
-    lineage = {}
-    for relpath in relpaths:
-        if relpath in origin:
-            lineage[relpath] = utc_iso(origin[relpath])
-            continue
-        lineage[relpath] = _first_commit(root, relpath, head)
-    return lineage
+    return origin
 
 
 def _first_commit(root: Path, relpath: str, head: str) -> str:

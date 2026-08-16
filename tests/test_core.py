@@ -310,16 +310,28 @@ def test_stale_cache_refreshes_paired_blob_add_delete_and_move(db, seed, monkeyp
 
 
 def test_stale_cache_refreshes_across_several_commits(db, seed, monkeypatch):
+    from mddb import _index
+
     card = seed(title="Card", summary="zero", relpath="card.md")
+    first_commit = db.conn.execute(
+        "SELECT first_commit FROM entries WHERE id = ?", (card.id,)
+    ).fetchone()[0]
     for summary in ("one", "two", "three"):
         (db.root / "card.md").write_text(_card_text(card.id, summary=summary))
         _external_commit(db, summary)
+    monkeypatch.setattr(
+        _index,
+        "_first_commit",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("ordinary edits rescanned full card history")
+        ),
+    )
     refreshed = _reopen_without_rebuild(db, monkeypatch)
-    assert (
-        refreshed.conn.execute(
-            "SELECT summary FROM entries WHERE id = ?", (card.id,)
-        ).fetchone()[0]
-        == "three"
+    assert refreshed.conn.execute(
+        "SELECT summary, first_commit FROM entries WHERE id = ?", (card.id,)
+    ).fetchone() == (
+        "three",
+        first_commit,
     )
 
 

@@ -122,9 +122,9 @@ def open_index(root: Path, head: str = "") -> sqlite3.Connection:
     is mid-rebuild (which surfaced as SQLITE_READONLY / disk I/O errors on the
     loser's connection). The flock is uncontended in the common case and
     released as soon as the connection is returned. ``head == ""`` (no commits
-    yet) is the :meth:`MDDB.init` bootstrap, which constructs the instance
-    before ``git init`` — no ``.git`` to lock, and single-process by the
-    two-explicit-entry-points contract, so it opens unlocked.
+    yet) is the :meth:`MDDB.init` bootstrap: ``.git`` exists but has no HEAD,
+    and the two-explicit-entry-points contract makes that bootstrap
+    single-process, so it opens unlocked.
 
     Args:
         root: Absolute path to the mddb directory.

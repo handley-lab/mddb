@@ -56,9 +56,11 @@ class MDDB:
         for existing in (root / ".git", root / ".gitignore"):
             if existing.exists():
                 raise FileExistsError(existing)
-        db = cls(root)
         try:
-            db._git("init", "-q", "-b", "master")
+            subprocess.run(
+                ["git", "-C", root, "init", "-q", "-b", "master"], check=True
+            )
+            db = cls(root)
             (root / ".gitignore").write_text("*.tmp\n")
             db._git("add", "--", ".gitignore")
             db._git("commit", "-q", "-m", "initial commit")

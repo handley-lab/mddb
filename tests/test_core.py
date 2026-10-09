@@ -341,7 +341,7 @@ def test_refresh_pairs_moved_blob_without_rereading_its_card(db, seed, monkeypat
     assert rebuild(db.root, refreshed.head()).execute(query).fetchall() == rows
 
 
-def test_refresh_rejects_second_blob_for_untouched_card(db, seed):
+def test_refresh_rejects_second_blob_for_untouched_card(db, seed, monkeypatch):
     seed(title="Scan", summary="s", relpath="scan.md")
     (db.root / "scan.pdf").write_bytes(b"a")
     _external_commit(db, "one blob")
@@ -349,9 +349,8 @@ def test_refresh_rejects_second_blob_for_untouched_card(db, seed):
     db = mddb.MDDB(db.root)
     (db.root / "scan.png").write_bytes(b"b")
     _external_commit(db, "second blob")
-    db.conn.close()
     with pytest.raises(ValueError, match="multiple blobs"):
-        mddb.MDDB(db.root)
+        _reopen_without_rebuild(db, monkeypatch)
 
 
 def test_stale_cache_refreshes_across_several_commits(db, seed, monkeypatch):

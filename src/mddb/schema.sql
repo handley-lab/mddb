@@ -38,7 +38,7 @@ CREATE TRIGGER entries_ad AFTER DELETE ON entries BEGIN
         VALUES ('delete', old.rowid, old.yaml_text, old.body);
 END;
 
-CREATE TRIGGER entries_au AFTER UPDATE ON entries BEGIN
+CREATE TRIGGER entries_au AFTER UPDATE OF yaml_text, body ON entries BEGIN
     INSERT INTO entries_fts(entries_fts, rowid, yaml_text, body)
         VALUES ('delete', old.rowid, old.yaml_text, old.body);
     INSERT INTO entries_fts(rowid, yaml_text, body)

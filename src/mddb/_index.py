@@ -15,7 +15,7 @@ import yaml
 
 from .card import Card
 
-SCHEMA_VERSION = "7"
+SCHEMA_VERSION = "8"
 _SCHEMA = (Path(__file__).parent / "schema.sql").read_text()
 
 SCHEMA_DOC = """\
@@ -263,27 +263,38 @@ def rebuild_index(root: Path, head: str = "") -> sqlite3.Connection:
 def refresh_index(
     root: Path, conn: sqlite3.Connection, cached_head: str, head: str
 ) -> sqlite3.Connection:
-    """Refresh a current-schema cache across an ancestor HEAD advance."""
+    """Refresh a current-schema cache across an ancestor HEAD advance.
+
+    A card whose ``.md`` path changed is reindexed from ``head``. A card whose
+    ``.md`` is untouched but whose paired-blob path changed keeps its row and
+    has only ``blob_relpath`` updated.
+    """
     changed = _changed_paths(root, cached_head, head)
     tree = _tree(root, head)
-    cached_paths = {row[0] for row in conn.execute("SELECT relpath FROM entries")}
+    cached = dict(conn.execute("SELECT relpath, blob_relpath FROM entries"))
     candidates = {
         path if path.endswith(".md") else str(Path(path).with_suffix(".md"))
         for path in changed
         if Path(path).suffix
     }
-    candidates &= cached_paths | {path for path in tree if path.endswith(".md")}
-    current = sorted(
-        path for path in candidates if path in tree and path.endswith(".md")
-    )
+    candidates &= cached.keys() | {path for path in tree if path.endswith(".md")}
+    stale = candidates & changed
+    current = sorted(path for path in stale if path in tree and path.endswith(".md"))
     cards = _cards_from_tree(root, tree, current)
+    blobs = _blob_paths(tree, sorted(candidates - stale))
     lineage = _refresh_lineage(root, conn, cached_head, head, current)
     with conn:
-        for relpath in candidates:
+        for relpath in stale:
             conn.execute("DELETE FROM entries WHERE relpath = ?", (relpath,))
         for relpath in current:
             card, blob_relpath = cards[relpath]
             insert(conn, card, relpath, lineage[relpath], blob_relpath)
+        for relpath, blob_relpath in blobs.items():
+            if blob_relpath != cached[relpath]:
+                conn.execute(
+                    "UPDATE entries SET blob_relpath = ? WHERE relpath = ?",
+                    (blob_relpath, relpath),
+                )
         analyze(conn)
         set_git_head(conn, head)
     return conn
@@ -311,13 +322,22 @@ def _cards_from_tree(
     root: Path, tree: dict[str, str], relpaths: list[str]
 ) -> dict[str, tuple[Card, str | None]]:
     """Read selected cards and their paired-blob paths from one tracked tree."""
+    blobs = _blob_paths(tree, relpaths)
+    texts = _cat_blobs(root, [(path, tree[path]) for path in relpaths])
+    return {
+        relpath: (Card.from_text(texts[relpath].decode()), blobs[relpath])
+        for relpath in relpaths
+    }
+
+
+def _blob_paths(tree: dict[str, str], relpaths: list[str]) -> dict[str, str | None]:
+    """Return each selected card's paired-blob path in one tracked tree."""
     blobs: dict[tuple[Path, str], list[str]] = {}
     for path in tree:
         parsed = Path(path)
         if parsed.suffix not in ("", ".md"):
             blobs.setdefault((parsed.parent, parsed.stem), []).append(path)
-    texts = _cat_blobs(root, [(path, tree[path]) for path in relpaths])
-    cards = {}
+    found = {}
     for relpath in relpaths:
         parsed = Path(relpath)
         hits = blobs.get((parsed.parent, parsed.stem), [])
@@ -325,11 +345,8 @@ def _cards_from_tree(
             raise ValueError(
                 f"multiple blobs for {parsed.name}: {sorted(Path(p).name for p in hits)}"
             )
-        cards[relpath] = (
-            Card.from_text(texts[relpath].decode()),
-            hits[0] if hits else None,
-        )
-    return cards
+        found[relpath] = hits[0] if hits else None
+    return found
 
 
 def _cat_blobs(root: Path, objects: list[tuple[str, str]]) -> dict[str, bytes]:

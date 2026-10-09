@@ -309,6 +309,50 @@ def test_stale_cache_refreshes_paired_blob_add_delete_and_move(db, seed, monkeyp
     assert all(row["blob_relpath"] is None for row in removed.list())
 
 
+def test_refresh_pairs_moved_blob_without_rereading_its_card(db, seed, monkeypatch):
+    from mddb import _index
+
+    card = seed(title="Card", summary="s", relpath="card.md")
+    (db.root / "archive").mkdir()
+    (db.root / "archive" / "card.pdf").write_bytes(b"blob")
+    _external_commit(db, "unpaired blob")
+    db.conn.close()
+    db = mddb.MDDB(db.root)
+    (db.root / "archive" / "card.pdf").rename(db.root / "card.pdf")
+    _external_commit(db, "pair blob")
+    rebuild = _index.rebuild_index
+    cat_blobs = _index._cat_blobs
+    read = []
+
+    def recording(root, objects):
+        read.extend(path for path, _oid in objects)
+        return cat_blobs(root, objects)
+
+    monkeypatch.setattr(_index, "_cat_blobs", recording)
+    refreshed = _reopen_without_rebuild(db, monkeypatch)
+    assert read == []
+    query = "SELECT id, relpath, title, summary, kind, blob_relpath, first_commit, yaml_text, body FROM entries"
+    rows = refreshed.conn.execute(query).fetchall()
+    assert [row[5] for row in rows if row[0] == card.id] == ["card.pdf"]
+    refreshed.conn.execute(
+        "INSERT INTO entries_fts(entries_fts) VALUES ('integrity-check')"
+    )
+    refreshed.conn.close()
+    assert rebuild(db.root, refreshed.head()).execute(query).fetchall() == rows
+
+
+def test_refresh_rejects_second_blob_for_untouched_card(db, seed, monkeypatch):
+    seed(title="Scan", summary="s", relpath="scan.md")
+    (db.root / "scan.pdf").write_bytes(b"a")
+    _external_commit(db, "one blob")
+    db.conn.close()
+    db = mddb.MDDB(db.root)
+    (db.root / "scan.png").write_bytes(b"b")
+    _external_commit(db, "second blob")
+    with pytest.raises(ValueError, match="multiple blobs"):
+        _reopen_without_rebuild(db, monkeypatch)
+
+
 def test_stale_cache_refreshes_across_several_commits(db, seed, monkeypatch):
     from mddb import _index
 

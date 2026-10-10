@@ -452,6 +452,94 @@ def test_rebuild_records_non_card_frontmatter(db, seed, text, error):
     assert error in recorded
 
 
+@pytest.mark.parametrize("rebuild", [False, True])
+@pytest.mark.parametrize("field", ["id", "title", "summary", "kind"])
+@pytest.mark.parametrize(
+    "value", ["[bad]", "{nested: bad}", "!!set {bad: null}", "9223372036854775808"]
+)
+def test_unbindable_indexed_fields_are_recorded_and_reported(
+    db, seed, capsys, rebuild, field, value
+):
+    from mddb import _index
+
+    good = seed(title="Good", summary="s", relpath="good.md")
+    seed(title="Bad", summary="s", relpath="bad.md")
+    fields = {"id": "bad", "title": "Bad", "summary": "s", "kind": "note"}
+    fields[field] = value
+    (db.root / "bad.md").write_text(
+        "---\n" + "".join(f"{key}: {item}\n" for key, item in fields.items()) + "---\n"
+    )
+    _external_commit(db, "unbindable indexed field")
+    db.conn.close()
+    if rebuild:
+        cache_path(db.root).unlink()
+    for _ in range(2):
+        capsys.readouterr()
+        reopened = mddb.MDDB(db.root)
+        assert [item["id"] for item in reopened.list()] == [good.id]
+        [(relpath, error)] = _index.malformed(reopened.conn)
+        assert relpath == "bad.md"
+        assert field in error
+        assert error in capsys.readouterr().err
+        reopened.conn.close()
+
+
+@pytest.mark.parametrize("rebuild", [False, True])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "amount: " + "9" * 400,
+        "amount: [" + "9" * 400 + "]",
+        "9223372036854775808: x",
+        "null: value",
+        ".nan: value",
+    ],
+)
+def test_unrepresentable_generic_field_is_recorded(db, seed, capsys, rebuild, field):
+    from mddb import _index
+
+    good = seed(title="Good", summary="s", relpath="good.md")
+    (db.root / "bad.md").write_text(f"---\nid: bad\n{field}\n---\n")
+    _external_commit(db, "unrepresentable numeric field")
+    db.conn.close()
+    if rebuild:
+        cache_path(db.root).unlink()
+    for _ in range(2):
+        capsys.readouterr()
+        reopened = mddb.MDDB(db.root)
+        assert [item["id"] for item in reopened.list()] == [good.id]
+        [(relpath, error)] = _index.malformed(reopened.conn)
+        assert relpath == "bad.md"
+        assert "entry_fields cannot be indexed" in error
+        assert error in capsys.readouterr().err
+        reopened.conn.close()
+
+
+@pytest.mark.parametrize("rebuild", [False, True])
+def test_bindable_fields_and_unindexed_containers_remain_valid(db, seed, rebuild):
+    from mddb import _index
+
+    seed(title="Card", summary="s", relpath="card.md")
+    (db.root / "card.md").write_text(
+        "---\nid: card\ntitle: 42\nsummary: null\nkind: true\n"
+        "values: [1, x, {nested: value}, [2]]\nnested: {field: value}\n"
+        "null: {unindexed: value}\n---\n"
+    )
+    _external_commit(db, "bindable fields and unindexed containers")
+    db.conn.close()
+    if rebuild:
+        cache_path(db.root).unlink()
+    reopened = mddb.MDDB(db.root)
+    assert _index.malformed(reopened.conn) == []
+    assert reopened.conn.execute(
+        "SELECT title, summary, kind FROM entries"
+    ).fetchone() == ("42", None, "1")
+    assert reopened.conn.execute(
+        "SELECT value_str, value_num FROM entry_fields WHERE key = 'values'"
+    ).fetchall() == [("1", 1.0), ("x", None)]
+    reopened.conn.close()
+
+
 def test_rebuild_reads_cards_and_blobs_from_captured_commit(db, seed):
     from mddb import _index
 

@@ -42,7 +42,8 @@ entries_fts(yaml_text, body)
 malformed(relpath, error)
   one row per tracked .md file at the indexed HEAD that is not a card: its
   frontmatter is unparseable or not a mapping, its id is not a non-empty
-  string, or it has more than one blob. It has no entries row until fixed."""
+  string, its fields cannot be represented in SQLite, or it has more than one
+  blob. It has no entries row until fixed."""
 
 
 def open_index_readonly(root: Path) -> sqlite3.Connection:
@@ -244,7 +245,7 @@ def rebuild_index(root: Path, head: str = "") -> sqlite3.Connection:
         head = resolved.stdout.strip() if resolved.returncode == 0 else ""
     tree = _tree(root, head) if head else {}
     relpaths = sorted(path for path in tree if path.endswith(".md"))
-    cards, malformed = _cards_from_tree(root, tree, relpaths)
+    cards, malformed = _cards_from_tree(conn, root, tree, relpaths)
     lineage = first_commits(root, relpaths, head)
     with conn:
         conn.execute(
@@ -287,7 +288,7 @@ def refresh_index(
     current = sorted(
         path for path in candidates if path in tree and path.endswith(".md")
     )
-    cards, malformed = _cards_from_tree(root, tree, current)
+    cards, malformed = _cards_from_tree(conn, root, tree, current)
     lineage = _refresh_lineage(root, conn, cached_head, head, current)
     with conn:
         for relpath in candidates:
@@ -322,7 +323,7 @@ def _tree(root: Path, head: str) -> dict[str, str]:
 
 
 def _cards_from_tree(
-    root: Path, tree: dict[str, str], relpaths: list[str]
+    conn: sqlite3.Connection, root: Path, tree: dict[str, str], relpaths: list[str]
 ) -> tuple[dict[str, tuple[Card, str | None]], dict[str, str]]:
     """Read selected cards and their paired-blob paths from one tracked tree.
 
@@ -354,7 +355,25 @@ def _cards_from_tree(
         elif not isinstance(card.yaml.get("id"), str) or not card.yaml["id"]:
             malformed[relpath] = "id is not a non-empty string"
         else:
-            cards[relpath] = (card, hits[0] if hits else None)
+            for field in ("title", "summary", "kind"):
+                try:
+                    conn.execute("SELECT ?", (card.yaml.get(field),))
+                except (sqlite3.ProgrammingError, OverflowError) as error:
+                    malformed[relpath] = f"{field} cannot be indexed: {error}"
+                    break
+            else:
+                try:
+                    for row in _field_rows(0, card.yaml):
+                        bound = conn.execute("SELECT ?, ?, ?, ?", row).fetchone()
+                        if bound[1] is None:
+                            malformed[relpath] = (
+                                "entry_fields cannot be indexed: key is null"
+                            )
+                            break
+                    else:
+                        cards[relpath] = (card, hits[0] if hits else None)
+                except (sqlite3.ProgrammingError, OverflowError) as error:
+                    malformed[relpath] = f"entry_fields cannot be indexed: {error}"
     return cards, malformed
 
 
@@ -770,6 +789,13 @@ def index_fields(conn: sqlite3.Connection, rowid: int, data: dict) -> None:
         rowid: The ``entries.rowid`` of the parent row.
         data: The card's YAML frontmatter as a Python dict.
     """
+    conn.executemany(
+        "INSERT INTO entry_fields(entry_rowid, key, value_str, value_num) VALUES (?, ?, ?, ?)",
+        _field_rows(rowid, data),
+    )
+
+
+def _field_rows(rowid: int, data: dict) -> list[tuple]:
     rows = []
     for key, value in data.items():
         if key in ("title", "summary", "kind"):
@@ -782,10 +808,7 @@ def index_fields(conn: sqlite3.Connection, rowid: int, data: dict) -> None:
                     rows.append(_row(rowid, key, item))
         else:
             rows.append(_row(rowid, key, value))
-    conn.executemany(
-        "INSERT INTO entry_fields(entry_rowid, key, value_str, value_num) VALUES (?, ?, ?, ?)",
-        rows,
-    )
+    return rows
 
 
 def _row(rowid: int, key: str, value) -> tuple:

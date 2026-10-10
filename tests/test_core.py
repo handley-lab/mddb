@@ -378,19 +378,78 @@ def test_nonancestor_head_forces_rebuild(db, seed, monkeypatch):
     assert {row["id"] for row in reopened.list()} == {"new"}
 
 
-def test_refresh_failure_rolls_back_rows_and_cached_head(db, seed):
+def test_refresh_records_and_reports_malformed_card(db, seed, capsys):
     from mddb import _index
 
-    card = seed(title="Good", summary="s", relpath="card.md")
-    cached_head = _index.git_head(db.conn)
+    good = seed(title="Good", summary="s", relpath="good.md")
+    seed(title="Bad", summary="s", relpath="card.md")
     (db.root / "card.md").write_text("not a card\n")
     _external_commit(db, "malformed external card")
     db.conn.close()
-    with pytest.raises(ValueError, match="malformed frontmatter"):
-        mddb.MDDB(db.root)
-    conn = _index.open_index_readonly(db.root)
-    assert _index.git_head(conn) == cached_head
-    assert conn.execute("SELECT id FROM entries").fetchone()[0] == card.id
+    capsys.readouterr()
+    reopened = mddb.MDDB(db.root)
+    assert _index.git_head(reopened.conn) == reopened.head()
+    assert [row[0] for row in reopened.conn.execute("SELECT id FROM entries")] == [
+        good.id
+    ]
+    assert _index.malformed(reopened.conn) == [
+        ("card.md", "malformed frontmatter (expected '---\\n...\\n---\\n' prefix)")
+    ]
+    assert f"malformed card not indexed: {db.root / 'card.md'}" in (
+        capsys.readouterr().err
+    )
+
+
+def test_fixing_malformed_card_indexes_it_and_stops_reporting(db, seed, capsys):
+    from mddb import _index
+
+    card = seed(title="Card", summary="s", relpath="card.md")
+    text = (db.root / "card.md").read_text()
+    (db.root / "card.md").write_text("not a card\n")
+    _external_commit(db, "break card")
+    db.conn.close()
+    mddb.MDDB(db.root).conn.close()
+    (db.root / "card.md").write_text(text)
+    _external_commit(db, "fix card")
+    capsys.readouterr()
+    fixed = mddb.MDDB(db.root)
+    assert _index.malformed(fixed.conn) == []
+    assert fixed.read(card.id).title == "Card"
+    assert capsys.readouterr().err == ""
+
+
+def test_deleting_malformed_card_clears_its_record(db, seed):
+    from mddb import _index
+
+    seed(title="Card", summary="s", relpath="card.md")
+    (db.root / "card.md").write_text("not a card\n")
+    _external_commit(db, "break card")
+    db.conn.close()
+    mddb.MDDB(db.root).conn.close()
+    db._git("rm", "-q", "card.md")
+    db._git("commit", "-q", "-m", "remove card")
+    assert _index.malformed(mddb.MDDB(db.root).conn) == []
+
+
+@pytest.mark.parametrize(
+    ("text", "error"),
+    [
+        ("---\n- a list\n---\nbody\n", "frontmatter is not a mapping"),
+        ("---\ntitle: no id\n---\nbody\n", "id is not a non-empty string"),
+        ("---\nid: [unclosed\n---\nbody\n", "while parsing"),
+    ],
+)
+def test_rebuild_records_non_card_frontmatter(db, seed, text, error):
+    from mddb import _index
+
+    seed(title="Card", summary="s", relpath="card.md")
+    (db.root / "card.md").write_text(text)
+    _external_commit(db, "non-card frontmatter")
+    db.conn.close()
+    cache_path(db.root).unlink()
+    [(relpath, recorded)] = _index.malformed(mddb.MDDB(db.root).conn)
+    assert relpath == "card.md"
+    assert error in recorded
 
 
 def test_rebuild_reads_cards_and_blobs_from_captured_commit(db, seed):
@@ -407,15 +466,20 @@ def test_rebuild_reads_cards_and_blobs_from_captured_commit(db, seed):
     ).fetchone() == ("clean", None)
 
 
-def test_rebuild_rejects_two_tracked_blobs(db, seed):
+def test_rebuild_records_two_tracked_blobs_as_malformed(db, seed):
+    from mddb import _index
+
     seed(title="Scan", summary="s", relpath="scan.md")
     (db.root / "scan.pdf").write_bytes(b"a")
     (db.root / "scan.png").write_bytes(b"b")
     _external_commit(db, "ambiguous blobs")
     db.conn.close()
     cache_path(db.root).unlink()
-    with pytest.raises(ValueError, match="multiple blobs"):
-        mddb.MDDB(db.root)
+    reopened = mddb.MDDB(db.root)
+    assert reopened.conn.execute("SELECT COUNT(*) FROM entries").fetchone() == (0,)
+    assert _index.malformed(reopened.conn) == [
+        ("scan.md", "multiple blobs for scan.md: ['scan.pdf', 'scan.png']")
+    ]
 
 
 def test_refresh_reads_changed_card_and_blob_membership_from_commit(db, seed):

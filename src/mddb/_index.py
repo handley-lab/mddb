@@ -15,7 +15,7 @@ import yaml
 
 from .card import Card
 
-SCHEMA_VERSION = "7"
+SCHEMA_VERSION = "8"
 _SCHEMA = (Path(__file__).parent / "schema.sql").read_text()
 
 SCHEMA_DOC = """\
@@ -38,7 +38,11 @@ entries_fts(yaml_text, body)
     (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ?)
   MATCH is FTS5 syntax: phrases need quotes ("foo bar"), prefix is foo*,
   and punctuation is operators (wind-up parses as wind NOT up) — bind the
-  user's words as a quoted phrase, or strip punctuation, before matching."""
+  user's words as a quoted phrase, or strip punctuation, before matching.
+malformed(relpath, error)
+  one row per tracked .md file at the indexed HEAD that is not a card: its
+  frontmatter is unparseable or not a mapping, its id is not a non-empty
+  string, or it has more than one blob. It has no entries row until fixed."""
 
 
 def open_index_readonly(root: Path) -> sqlite3.Connection:
@@ -211,7 +215,8 @@ def rebuild_index(root: Path, head: str = "") -> sqlite3.Connection:
     inserts an ``entries`` row plus
     ``entry_fields`` rows for each, with ``first_commit`` derived from the
     deck's git history (:func:`first_commits`). Files under ``.git/`` are
-    skipped.
+    skipped. A tracked ``.md`` file that is not a card gets a ``malformed`` row
+    instead of an ``entries`` row.
 
     Args:
         root: Absolute path to the mddb directory.
@@ -220,8 +225,7 @@ def rebuild_index(root: Path, head: str = "") -> sqlite3.Connection:
         A live ``sqlite3.Connection`` to the new cache.
 
     Raises:
-        ValueError: A tracked ``.md`` file has malformed frontmatter or no Git
-            lineage.
+        ValueError: A tracked ``.md`` file has no Git lineage.
         sqlite3.IntegrityError: Two cards share the same ``id``.
     """
     db_path = cache_path(root)
@@ -240,15 +244,14 @@ def rebuild_index(root: Path, head: str = "") -> sqlite3.Connection:
         head = resolved.stdout.strip() if resolved.returncode == 0 else ""
     tree = _tree(root, head) if head else {}
     relpaths = sorted(path for path in tree if path.endswith(".md"))
-    cards = _cards_from_tree(root, tree, relpaths)
+    cards, malformed = _cards_from_tree(root, tree, relpaths)
     lineage = first_commits(root, relpaths, head)
     with conn:
         conn.execute(
             "INSERT INTO meta(key, value) VALUES ('schema_version', ?)",
             (SCHEMA_VERSION,),
         )
-        for relpath in relpaths:
-            card, blob_relpath = cards[relpath]
+        for relpath, (card, blob_relpath) in cards.items():
             insert(
                 conn,
                 card,
@@ -256,6 +259,9 @@ def rebuild_index(root: Path, head: str = "") -> sqlite3.Connection:
                 lineage[relpath],
                 blob_relpath,
             )
+        conn.executemany(
+            "INSERT INTO malformed(relpath, error) VALUES (?, ?)", malformed.items()
+        )
         analyze(conn)
     return conn
 
@@ -266,7 +272,12 @@ def refresh_index(
     """Refresh a current-schema cache across an ancestor HEAD advance."""
     changed = _changed_paths(root, cached_head, head)
     tree = _tree(root, head)
-    cached_paths = {row[0] for row in conn.execute("SELECT relpath FROM entries")}
+    cached_paths = {
+        row[0]
+        for row in conn.execute(
+            "SELECT relpath FROM entries UNION SELECT relpath FROM malformed"
+        )
+    }
     candidates = {
         path if path.endswith(".md") else str(Path(path).with_suffix(".md"))
         for path in changed
@@ -276,14 +287,17 @@ def refresh_index(
     current = sorted(
         path for path in candidates if path in tree and path.endswith(".md")
     )
-    cards = _cards_from_tree(root, tree, current)
+    cards, malformed = _cards_from_tree(root, tree, current)
     lineage = _refresh_lineage(root, conn, cached_head, head, current)
     with conn:
         for relpath in candidates:
             conn.execute("DELETE FROM entries WHERE relpath = ?", (relpath,))
-        for relpath in current:
-            card, blob_relpath = cards[relpath]
+            conn.execute("DELETE FROM malformed WHERE relpath = ?", (relpath,))
+        for relpath, (card, blob_relpath) in cards.items():
             insert(conn, card, relpath, lineage[relpath], blob_relpath)
+        conn.executemany(
+            "INSERT INTO malformed(relpath, error) VALUES (?, ?)", malformed.items()
+        )
         analyze(conn)
         set_git_head(conn, head)
     return conn
@@ -309,8 +323,11 @@ def _tree(root: Path, head: str) -> dict[str, str]:
 
 def _cards_from_tree(
     root: Path, tree: dict[str, str], relpaths: list[str]
-) -> dict[str, tuple[Card, str | None]]:
-    """Read selected cards and their paired-blob paths from one tracked tree."""
+) -> tuple[dict[str, tuple[Card, str | None]], dict[str, str]]:
+    """Read selected cards and their paired-blob paths from one tracked tree.
+
+    Returns the cards, and the error for each selected path that is not a card.
+    """
     blobs: dict[tuple[Path, str], list[str]] = {}
     for path in tree:
         parsed = Path(path)
@@ -318,18 +335,34 @@ def _cards_from_tree(
             blobs.setdefault((parsed.parent, parsed.stem), []).append(path)
     texts = _cat_blobs(root, [(path, tree[path]) for path in relpaths])
     cards = {}
+    malformed = {}
     for relpath in relpaths:
         parsed = Path(relpath)
         hits = blobs.get((parsed.parent, parsed.stem), [])
         if len(hits) > 1:
-            raise ValueError(
+            malformed[relpath] = (
                 f"multiple blobs for {parsed.name}: {sorted(Path(p).name for p in hits)}"
             )
-        cards[relpath] = (
-            Card.from_text(texts[relpath].decode()),
-            hits[0] if hits else None,
-        )
-    return cards
+            continue
+        try:
+            card = Card.from_text(texts[relpath].decode())
+        except (ValueError, yaml.YAMLError) as error:
+            malformed[relpath] = str(error)
+            continue
+        if not isinstance(card.yaml, dict):
+            malformed[relpath] = "frontmatter is not a mapping"
+        elif not isinstance(card.yaml.get("id"), str) or not card.yaml["id"]:
+            malformed[relpath] = "id is not a non-empty string"
+        else:
+            cards[relpath] = (card, hits[0] if hits else None)
+    return cards, malformed
+
+
+def malformed(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+    """Return ``(relpath, error)`` for every tracked non-card, by relpath."""
+    return conn.execute(
+        "SELECT relpath, error FROM malformed ORDER BY relpath"
+    ).fetchall()
 
 
 def _cat_blobs(root: Path, objects: list[tuple[str, str]]) -> dict[str, bytes]:

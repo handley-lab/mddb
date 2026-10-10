@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -33,10 +34,18 @@ class MDDB:
     """
 
     def __init__(self, path: Path | str):
-        """Open the mddb at ``path``. Use :meth:`init` to bootstrap a fresh one."""
+        """Open the mddb at ``path``. Use :meth:`init` to bootstrap a fresh one.
+
+        Every tracked ``.md`` file that is not a card is reported on stderr, on
+        every open, until it is fixed.
+        """
         self.root = Path(path).expanduser().resolve()
         self.conn = _index.open_index(self.root, self._head_or_empty())
         self._active_editor: _Editor | None = None
+        for relpath, error in _index.malformed(self.conn):
+            sys.stderr.write(
+                f"mddb: malformed card not indexed: {self.root / relpath}: {error}\n"
+            )
 
     @classmethod
     def init(cls, path: Path | str) -> MDDB:

@@ -56,6 +56,9 @@ documents the query surface. Expose `db.conn`; do not add a filter or search DSL
 - Opening never creates. `MDDB.init` is the explicit bootstrap operation.
 - Mutation order is filesystem, Git, then SQLite. A stale or schema-mismatched
   cache rebuilds from the locked Git HEAD.
+- A tracked `.md` file that is not a card never stops indexing. It is recorded
+  in the `malformed` table instead of `entries`, and every open reports it on
+  stderr until it is fixed.
 - Card IDs are immutable. Relpaths are relative, canonical, inside the deck,
   and collision-free.
 - A card may own one tracked non-Markdown sibling with the same exact stem.

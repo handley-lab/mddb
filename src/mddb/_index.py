@@ -46,6 +46,58 @@ malformed(relpath, error)
   blob. It has no entries row until fixed."""
 
 
+class IndexUnavailable(RuntimeError):
+    """An existing current index cannot be read without waiting or rebuilding."""
+
+
+def open_current_index(path: Path | str) -> sqlite3.Connection:
+    """Read an existing current index without waiting for a deck writer.
+
+    Args:
+        path: Path to an existing deck.
+
+    Returns:
+        A read-only connection with a pinned read transaction. Close it after use.
+
+    Raises:
+        IndexUnavailable: The index is missing, stale, or a deck writer holds
+            the lock. Open the deck with MDDB outside the reader to rebuild it.
+    """
+    root = Path(path).expanduser().resolve()
+    try:
+        with deck_lock(root, fcntl.LOCK_SH | fcntl.LOCK_NB):
+            if not cache_path(root).exists():
+                raise IndexUnavailable(
+                    f"{root}: index is missing; open with MDDB to rebuild"
+                )
+            conn = open_index_readonly(root)
+            try:
+                conn.execute("BEGIN")
+                row = conn.execute(
+                    "SELECT value FROM meta WHERE key='schema_version'"
+                ).fetchone()
+                if not row or row[0] != SCHEMA_VERSION:
+                    raise IndexUnavailable(
+                        f"{root}: index schema is stale; open with MDDB to rebuild"
+                    )
+                head = subprocess.run(
+                    ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+                if git_head(conn) != head:
+                    raise IndexUnavailable(
+                        f"{root}: index HEAD is stale; open with MDDB to refresh"
+                    )
+                return conn
+            except BaseException:
+                conn.close()
+                raise
+    except BlockingIOError as error:
+        raise IndexUnavailable(f"{root}: deck writer holds the index lock") from error
+
+
 def open_index_readonly(root: Path) -> sqlite3.Connection:
     """Open the cache at ``root`` read-only (``mode=ro``) for raw SQL queries.
 
@@ -74,7 +126,7 @@ def cache_path(root: Path) -> Path:
 
 
 @contextmanager
-def deck_lock(root: Path):
+def deck_lock(root: Path, operation: int = fcntl.LOCK_EX):
     """Serialise mddb writers (and stale-cache rebuilds) for the deck at ``root``.
 
     An advisory ``fcntl.flock`` on the read-only ``<root>/.git`` directory — held across a
@@ -84,7 +136,7 @@ def deck_lock(root: Path):
     """
     fd = os.open(root / ".git", os.O_RDONLY | os.O_DIRECTORY)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        fcntl.flock(fd, operation)
         yield
     finally:
         os.close(fd)

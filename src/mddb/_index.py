@@ -15,7 +15,7 @@ import yaml
 
 from .card import Card
 
-SCHEMA_VERSION = "7"
+SCHEMA_VERSION = "8"
 _SCHEMA = (Path(__file__).parent / "schema.sql").read_text()
 
 SCHEMA_DOC = """\
@@ -38,7 +38,64 @@ entries_fts(yaml_text, body)
     (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ?)
   MATCH is FTS5 syntax: phrases need quotes ("foo bar"), prefix is foo*,
   and punctuation is operators (wind-up parses as wind NOT up) — bind the
-  user's words as a quoted phrase, or strip punctuation, before matching."""
+  user's words as a quoted phrase, or strip punctuation, before matching.
+malformed(relpath, error)
+  one row per tracked .md file at the indexed HEAD that is not a card: its
+  frontmatter is unparseable or not a mapping, its id is not a non-empty
+  string, its fields cannot be represented in SQLite, or it has more than one
+  blob. It has no entries row until fixed."""
+
+
+class IndexUnavailable(RuntimeError):
+    """An existing current index cannot be read without waiting or rebuilding."""
+
+
+def open_current_index(path: Path | str) -> sqlite3.Connection:
+    """Read an existing current index without waiting for a deck writer.
+
+    Args:
+        path: Path to an existing deck.
+
+    Returns:
+        A read-only connection with a pinned read transaction. Close it after use.
+
+    Raises:
+        IndexUnavailable: The index is missing, stale, or a deck writer holds
+            the lock. Open the deck with MDDB outside the reader to rebuild it.
+    """
+    root = Path(path).expanduser().resolve()
+    try:
+        with deck_lock(root, fcntl.LOCK_SH | fcntl.LOCK_NB):
+            if not cache_path(root).exists():
+                raise IndexUnavailable(
+                    f"{root}: index is missing; open with MDDB to rebuild"
+                )
+            conn = open_index_readonly(root)
+            try:
+                conn.execute("BEGIN")
+                row = conn.execute(
+                    "SELECT value FROM meta WHERE key='schema_version'"
+                ).fetchone()
+                if not row or row[0] != SCHEMA_VERSION:
+                    raise IndexUnavailable(
+                        f"{root}: index schema is stale; open with MDDB to rebuild"
+                    )
+                head = subprocess.run(
+                    ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+                if git_head(conn) != head:
+                    raise IndexUnavailable(
+                        f"{root}: index HEAD is stale; open with MDDB to refresh"
+                    )
+                return conn
+            except BaseException:
+                conn.close()
+                raise
+    except BlockingIOError as error:
+        raise IndexUnavailable(f"{root}: deck writer holds the index lock") from error
 
 
 def open_index_readonly(root: Path) -> sqlite3.Connection:
@@ -69,7 +126,7 @@ def cache_path(root: Path) -> Path:
 
 
 @contextmanager
-def deck_lock(root: Path):
+def deck_lock(root: Path, operation: int = fcntl.LOCK_EX):
     """Serialise mddb writers (and stale-cache rebuilds) for the deck at ``root``.
 
     An advisory ``fcntl.flock`` on the read-only ``<root>/.git`` directory — held across a
@@ -79,7 +136,7 @@ def deck_lock(root: Path):
     """
     fd = os.open(root / ".git", os.O_RDONLY | os.O_DIRECTORY)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        fcntl.flock(fd, operation)
         yield
     finally:
         os.close(fd)
@@ -211,7 +268,8 @@ def rebuild_index(root: Path, head: str = "") -> sqlite3.Connection:
     inserts an ``entries`` row plus
     ``entry_fields`` rows for each, with ``first_commit`` derived from the
     deck's git history (:func:`first_commits`). Files under ``.git/`` are
-    skipped.
+    skipped. A tracked ``.md`` file that is not a card gets a ``malformed`` row
+    instead of an ``entries`` row.
 
     Args:
         root: Absolute path to the mddb directory.
@@ -220,8 +278,7 @@ def rebuild_index(root: Path, head: str = "") -> sqlite3.Connection:
         A live ``sqlite3.Connection`` to the new cache.
 
     Raises:
-        ValueError: A tracked ``.md`` file has malformed frontmatter or no Git
-            lineage.
+        ValueError: A tracked ``.md`` file has no Git lineage.
         sqlite3.IntegrityError: Two cards share the same ``id``.
     """
     db_path = cache_path(root)
@@ -240,15 +297,14 @@ def rebuild_index(root: Path, head: str = "") -> sqlite3.Connection:
         head = resolved.stdout.strip() if resolved.returncode == 0 else ""
     tree = _tree(root, head) if head else {}
     relpaths = sorted(path for path in tree if path.endswith(".md"))
-    cards = _cards_from_tree(root, tree, relpaths)
+    cards, malformed = _cards_from_tree(conn, root, tree, relpaths)
     lineage = first_commits(root, relpaths, head)
     with conn:
         conn.execute(
             "INSERT INTO meta(key, value) VALUES ('schema_version', ?)",
             (SCHEMA_VERSION,),
         )
-        for relpath in relpaths:
-            card, blob_relpath = cards[relpath]
+        for relpath, (card, blob_relpath) in cards.items():
             insert(
                 conn,
                 card,
@@ -256,6 +312,9 @@ def rebuild_index(root: Path, head: str = "") -> sqlite3.Connection:
                 lineage[relpath],
                 blob_relpath,
             )
+        conn.executemany(
+            "INSERT INTO malformed(relpath, error) VALUES (?, ?)", malformed.items()
+        )
         analyze(conn)
     return conn
 
@@ -266,7 +325,12 @@ def refresh_index(
     """Refresh a current-schema cache across an ancestor HEAD advance."""
     changed = _changed_paths(root, cached_head, head)
     tree = _tree(root, head)
-    cached_paths = {row[0] for row in conn.execute("SELECT relpath FROM entries")}
+    cached_paths = {
+        row[0]
+        for row in conn.execute(
+            "SELECT relpath FROM entries UNION SELECT relpath FROM malformed"
+        )
+    }
     candidates = {
         path if path.endswith(".md") else str(Path(path).with_suffix(".md"))
         for path in changed
@@ -276,14 +340,17 @@ def refresh_index(
     current = sorted(
         path for path in candidates if path in tree and path.endswith(".md")
     )
-    cards = _cards_from_tree(root, tree, current)
+    cards, malformed = _cards_from_tree(conn, root, tree, current)
     lineage = _refresh_lineage(root, conn, cached_head, head, current)
     with conn:
         for relpath in candidates:
             conn.execute("DELETE FROM entries WHERE relpath = ?", (relpath,))
-        for relpath in current:
-            card, blob_relpath = cards[relpath]
+            conn.execute("DELETE FROM malformed WHERE relpath = ?", (relpath,))
+        for relpath, (card, blob_relpath) in cards.items():
             insert(conn, card, relpath, lineage[relpath], blob_relpath)
+        conn.executemany(
+            "INSERT INTO malformed(relpath, error) VALUES (?, ?)", malformed.items()
+        )
         analyze(conn)
         set_git_head(conn, head)
     return conn
@@ -308,9 +375,12 @@ def _tree(root: Path, head: str) -> dict[str, str]:
 
 
 def _cards_from_tree(
-    root: Path, tree: dict[str, str], relpaths: list[str]
-) -> dict[str, tuple[Card, str | None]]:
-    """Read selected cards and their paired-blob paths from one tracked tree."""
+    conn: sqlite3.Connection, root: Path, tree: dict[str, str], relpaths: list[str]
+) -> tuple[dict[str, tuple[Card, str | None]], dict[str, str]]:
+    """Read selected cards and their paired-blob paths from one tracked tree.
+
+    Returns the cards, and the error for each selected path that is not a card.
+    """
     blobs: dict[tuple[Path, str], list[str]] = {}
     for path in tree:
         parsed = Path(path)
@@ -318,18 +388,52 @@ def _cards_from_tree(
             blobs.setdefault((parsed.parent, parsed.stem), []).append(path)
     texts = _cat_blobs(root, [(path, tree[path]) for path in relpaths])
     cards = {}
+    malformed = {}
     for relpath in relpaths:
         parsed = Path(relpath)
         hits = blobs.get((parsed.parent, parsed.stem), [])
         if len(hits) > 1:
-            raise ValueError(
+            malformed[relpath] = (
                 f"multiple blobs for {parsed.name}: {sorted(Path(p).name for p in hits)}"
             )
-        cards[relpath] = (
-            Card.from_text(texts[relpath].decode()),
-            hits[0] if hits else None,
-        )
-    return cards
+            continue
+        try:
+            card = Card.from_text(texts[relpath].decode())
+        except (ValueError, yaml.YAMLError) as error:
+            malformed[relpath] = str(error)
+            continue
+        if not isinstance(card.yaml, dict):
+            malformed[relpath] = "frontmatter is not a mapping"
+        elif not isinstance(card.yaml.get("id"), str) or not card.yaml["id"]:
+            malformed[relpath] = "id is not a non-empty string"
+        else:
+            for field in ("title", "summary", "kind"):
+                try:
+                    conn.execute("SELECT ?", (card.yaml.get(field),))
+                except (sqlite3.ProgrammingError, OverflowError) as error:
+                    malformed[relpath] = f"{field} cannot be indexed: {error}"
+                    break
+            else:
+                try:
+                    for row in _field_rows(0, card.yaml):
+                        bound = conn.execute("SELECT ?, ?, ?, ?", row).fetchone()
+                        if bound[1] is None:
+                            malformed[relpath] = (
+                                "entry_fields cannot be indexed: key is null"
+                            )
+                            break
+                    else:
+                        cards[relpath] = (card, hits[0] if hits else None)
+                except (sqlite3.ProgrammingError, OverflowError) as error:
+                    malformed[relpath] = f"entry_fields cannot be indexed: {error}"
+    return cards, malformed
+
+
+def malformed(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+    """Return ``(relpath, error)`` for every tracked non-card, by relpath."""
+    return conn.execute(
+        "SELECT relpath, error FROM malformed ORDER BY relpath"
+    ).fetchall()
 
 
 def _cat_blobs(root: Path, objects: list[tuple[str, str]]) -> dict[str, bytes]:
@@ -737,6 +841,13 @@ def index_fields(conn: sqlite3.Connection, rowid: int, data: dict) -> None:
         rowid: The ``entries.rowid`` of the parent row.
         data: The card's YAML frontmatter as a Python dict.
     """
+    conn.executemany(
+        "INSERT INTO entry_fields(entry_rowid, key, value_str, value_num) VALUES (?, ?, ?, ?)",
+        _field_rows(rowid, data),
+    )
+
+
+def _field_rows(rowid: int, data: dict) -> list[tuple]:
     rows = []
     for key, value in data.items():
         if key in ("title", "summary", "kind"):
@@ -749,10 +860,7 @@ def index_fields(conn: sqlite3.Connection, rowid: int, data: dict) -> None:
                     rows.append(_row(rowid, key, item))
         else:
             rows.append(_row(rowid, key, value))
-    conn.executemany(
-        "INSERT INTO entry_fields(entry_rowid, key, value_str, value_num) VALUES (?, ?, ?, ?)",
-        rows,
-    )
+    return rows
 
 
 def _row(rowid: int, key: str, value) -> tuple:

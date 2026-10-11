@@ -9,8 +9,15 @@ agent can ``print(mddb.SCHEMA_DOC)`` to recall the schema and the FTS idiom.
 """
 
 from ._core import ConflictError, MDDB
-from ._index import SCHEMA_DOC
+from ._index import SCHEMA_DOC, IndexUnavailable, open_current_index
 from .card import Card
 
 __version__ = "0.0.14"
-__all__ = ["MDDB", "Card", "ConflictError", "SCHEMA_DOC"]
+__all__ = [
+    "MDDB",
+    "Card",
+    "ConflictError",
+    "IndexUnavailable",
+    "SCHEMA_DOC",
+    "open_current_index",
+]

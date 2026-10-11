@@ -20,6 +20,11 @@ CREATE TABLE entry_fields(
     value_num REAL
 );
 
+CREATE TABLE malformed(
+    relpath TEXT PRIMARY KEY,
+    error TEXT NOT NULL
+);
+
 CREATE INDEX entry_fields_key_str ON entry_fields(key, value_str);
 CREATE INDEX entry_fields_key_num ON entry_fields(key, value_num);
 CREATE INDEX entry_fields_entry_key ON entry_fields(entry_rowid, key);

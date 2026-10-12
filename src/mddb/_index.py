@@ -8,6 +8,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -457,6 +458,8 @@ def _write_committed_census(path: Path, document: dict) -> None:
         temporary = Path(stream.name)
         try:
             json.dump(document, stream, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
             stream.close()
             os.replace(temporary, path)
         finally:
@@ -470,6 +473,14 @@ def _selected_committed_cards(conn, root, tree, kind, publish):
         document = json.loads(path.read_text())
     except FileNotFoundError:
         document = {}
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        print(f"mddb: discarding census {path}: {error}", file=sys.stderr)
+        document = {}
+    if document and document.get("version") != version:
+        print(
+            f"mddb: discarding census {path}: validation version changed",
+            file=sys.stderr,
+        )
     prior = document.get("blobs", {}) if document.get("version") == version else {}
     markdown = {p: oid for p, oid in tree.items() if p.endswith(".md")}
     records = {oid: prior[oid] for oid in set(markdown.values()) if oid in prior}
@@ -495,7 +506,10 @@ def _selected_committed_cards(conn, root, tree, kind, publish):
                 None,
             ]
     if publish and (records != prior or document.get("version") != version):
-        _write_committed_census(path, {"version": version, "blobs": records})
+        try:
+            _write_committed_census(path, {"version": version, "blobs": records})
+        except OSError as error:
+            print(f"mddb: cannot publish census {path}: {error}", file=sys.stderr)
 
     blobs = _paired_blobs(tree)
     eligible, rejected, identities = {}, {}, {}

@@ -268,7 +268,7 @@ def test_selected_cache_loss_and_validation_change_rebuild(db, monkeypatch):
     assert json.loads(cache.read_text())["version"] == "changed"
 
 
-def test_selected_atomic_publication_failure_keeps_prior_cache(db, monkeypatch):
+def test_selected_atomic_publication_failure_keeps_prior_cache(db, monkeypatch, capsys):
     write_card(db.root, "agent.md", "agent", kind="agent")
     commit(db.root, "First")
     mddb.read_committed_cards(db.root, kind="agent")
@@ -281,10 +281,69 @@ def test_selected_atomic_publication_failure_keeps_prior_cache(db, monkeypatch):
         raise OSError("interrupted publication")
 
     monkeypatch.setattr(_index.os, "replace", fail)
-    with pytest.raises(OSError, match="interrupted publication"):
-        mddb.read_committed_cards(db.root, kind="agent")
+    cards, errors = mddb.read_committed_cards(db.root, kind="agent")
+    assert set(cards) == {"agent.md"} and not errors
+    assert f"cannot publish census {cache}" in capsys.readouterr().err
     assert cache.read_bytes() == before
     assert set(cache.parent.iterdir()) == {cache, _index.cache_path(db.root)}
+
+
+@pytest.mark.parametrize("damage", [b'{"version":', b"\xff", b'{"version":"unknown"}'])
+def test_selected_bad_census_rebuilds_with_diagnostic(db, damage, capsys):
+    write_card(db.root, "agent.md", "agent", kind="agent")
+    write_card(db.root, "note.md", "note", kind="note")
+    commit(db.root, "Census")
+    assert_selected_parity(db.root)
+    cache = _index._committed_census_path(db.root)
+    cache.write_bytes(damage)
+    assert_selected_parity(db.root)
+    assert f"discarding census {cache}" in capsys.readouterr().err
+    assert (
+        json.loads(cache.read_text())["version"]
+        == _index._committed_validation_version()
+    )
+
+
+def test_census_is_synced_before_replacement(db, monkeypatch):
+    events = []
+    sync, replace = _index.os.fsync, _index.os.replace
+
+    def synced(fd):
+        events.append("fsync")
+        sync(fd)
+
+    def replaced(source, target):
+        assert events == ["fsync"]
+        assert json.loads(source.read_text()) == {"version": "fixture", "blobs": {}}
+        events.append("replace")
+        replace(source, target)
+
+    monkeypatch.setattr(_index.os, "fsync", synced)
+    monkeypatch.setattr(_index.os, "replace", replaced)
+    _index._write_committed_census(
+        _index._committed_census_path(db.root), {"version": "fixture", "blobs": {}}
+    )
+    assert events == ["fsync", "replace"]
+
+
+def test_selected_unreadable_census_is_not_an_enumeration_failure(
+    db, monkeypatch, capsys
+):
+    write_card(db.root, "agent.md", "agent", kind="agent")
+    commit(db.root, "Agent")
+    assert_selected_parity(db.root)
+    cache = _index._committed_census_path(db.root)
+    read = type(cache).read_text
+
+    def unreadable(path, *args, **kwargs):
+        if path == cache:
+            raise PermissionError("census unreadable")
+        return read(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(cache), "read_text", unreadable)
+    cards, errors = mddb.read_committed_cards(db.root, kind="agent")
+    assert set(cards) == {"agent.md"} and not errors
+    assert f"discarding census {cache}" in capsys.readouterr().err
 
 
 def test_selected_concurrent_bootstrap_is_atomic(db):

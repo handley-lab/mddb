@@ -48,6 +48,12 @@ cards = [db.read(card_id) for card_id in ids]
 Print `mddb.SCHEMA_DOC` for the index schema and FTS idiom. `db.list()` provides
 progressive disclosure; `db.history(card.id)` returns the card's Git history.
 
+`mddb.read_committed_cards(path, revision="HEAD")` reads one committed tree
+without locks or cache access. It returns accepted paths mapped to
+`(Card, paired_blob_relative_path_or_None)` and rejected paths mapped to
+diagnostics. It applies the index's acceptance rules, including rejecting every
+card in a duplicate-id group. Index rebuilds and refreshes use the same reader.
+
 ## Semantic merge driver
 
 MDDB supplies a Git merge driver for cards. Register its Python implementation

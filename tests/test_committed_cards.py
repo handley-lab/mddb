@@ -132,6 +132,31 @@ def test_invalid_revision_fails_visibly(db):
         mddb.read_committed_cards(db.root, "missing-revision")
 
 
+def test_reader_validates_without_serialization_or_full_text_indexing(db, monkeypatch):
+    write_card(db.root, "role.md", "role", kind="agent")
+    commit(db.root, "Committed role")
+    read_cards = _index._cards_from_tree
+
+    def forbid_fts(action, table, *args):
+        if action == _index.sqlite3.SQLITE_INSERT and table == "entries_fts":
+            return _index.sqlite3.SQLITE_DENY
+        return _index.sqlite3.SQLITE_OK
+
+    def checked_cards(conn, *args):
+        result = read_cards(conn, *args)
+        conn.set_authorizer(forbid_fts)
+        return result
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("committed reader serialized frontmatter for a discarded index")
+
+    monkeypatch.setattr(_index, "_cards_from_tree", checked_cards)
+    monkeypatch.setattr(_index, "_yaml_text", forbidden)
+    cards, rejected = mddb.read_committed_cards(db.root)
+    assert not rejected
+    assert cards["role.md"][0].id == "role"
+
+
 def test_reader_enforces_schema_even_if_per_file_checks_accept_invalid_card(
     db, monkeypatch
 ):

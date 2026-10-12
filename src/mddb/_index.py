@@ -364,6 +364,8 @@ def read_committed_cards(
     come from the same Git tree, regardless of working-tree changes. Acceptance
     uses the index schema and insertion code; all paths sharing a card id are
     rejected rather than choosing one of them.
+    Validation omits YAML serialization and full-text indexing; the parsed
+    frontmatter and body are returned directly.
 
     Args:
         path: Path to an existing deck.
@@ -383,13 +385,15 @@ def read_committed_cards(
     try:
         conn.execute("PRAGMA foreign_keys=ON")
         conn.executescript(_SCHEMA)
+        for trigger in ("entries_ai", "entries_ad", "entries_au"):
+            conn.execute(f"DROP TRIGGER {trigger}")
         cards, rejected = _cards_from_tree(
             conn, root, tree, sorted(path for path in tree if path.endswith(".md"))
         )
         for relpath, (card, blob_relpath) in list(cards.items()):
             try:
                 with conn:
-                    insert(conn, card, relpath, "", blob_relpath)
+                    _insert(conn, card, relpath, "", blob_relpath, "")
                     conn.rollback()
             except (
                 sqlite3.IntegrityError,
@@ -454,7 +458,7 @@ def _cards_from_tree(
             )
             continue
         try:
-            card = Card.from_text(texts[relpath].decode())
+            card = Card.from_text(texts.pop(relpath).decode())
         except (ValueError, yaml.YAMLError) as error:
             malformed[relpath] = str(error)
             continue
@@ -804,6 +808,17 @@ def insert(
     ``blob_relpath`` is the relpath of the card's blob, or ``None`` when it
     has none (a real state, not an omitted argument).
     """
+    _insert(conn, card, relpath, first_commit, blob_relpath, _yaml_text(card))
+
+
+def _insert(
+    conn: sqlite3.Connection,
+    card: Card,
+    relpath: str,
+    first_commit: str,
+    blob_relpath: str | None,
+    yaml_text: str,
+) -> None:
     cur = conn.execute(
         "INSERT INTO entries(id, relpath, title, summary, kind, blob_relpath, first_commit, yaml_text, body) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -815,7 +830,7 @@ def insert(
             card.yaml.get("kind"),
             blob_relpath,
             first_commit,
-            _yaml_text(card),
+            yaml_text,
             card.body,
         ),
     )

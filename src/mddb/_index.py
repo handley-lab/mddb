@@ -395,6 +395,7 @@ def read_committed_cards(
                 sqlite3.IntegrityError,
                 sqlite3.ProgrammingError,
                 OverflowError,
+                UnicodeError,
             ) as error:
                 rejected[relpath] = str(error)
                 del cards[relpath]
@@ -465,7 +466,7 @@ def _cards_from_tree(
             for field in ("title", "summary", "kind"):
                 try:
                     conn.execute("SELECT ?", (card.yaml.get(field),))
-                except (sqlite3.ProgrammingError, OverflowError) as error:
+                except (sqlite3.ProgrammingError, OverflowError, UnicodeError) as error:
                     malformed[relpath] = f"{field} cannot be indexed: {error}"
                     break
             else:
@@ -479,7 +480,7 @@ def _cards_from_tree(
                             break
                     else:
                         cards[relpath] = (card, hits[0] if hits else None)
-                except (sqlite3.ProgrammingError, OverflowError) as error:
+                except (sqlite3.ProgrammingError, OverflowError, UnicodeError) as error:
                     malformed[relpath] = f"entry_fields cannot be indexed: {error}"
     return cards, malformed
 

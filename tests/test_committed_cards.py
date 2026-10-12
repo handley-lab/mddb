@@ -89,6 +89,8 @@ def test_reader_and_index_share_per_path_acceptance(db):
     (db.root / "attachments.pdf").write_bytes(b"pdf")
     write_card(db.root, "summary.md", "summary", summary=["invalid"])
     write_card(db.root, "overflow.md", "overflow", summary=2**63)
+    write_card(db.root, "surrogate-id.md", "\ud800")
+    write_card(db.root, "surrogate-summary.md", "surrogate-summary", summary="\ud800")
     write_card(db.root, "null.md", "null")
     text = (
         (db.root / "null.md")
@@ -100,7 +102,7 @@ def test_reader_and_index_share_per_path_acceptance(db):
     commit(db.root, "Malformed cards")
     cards, rejected = mddb.read_committed_cards(db.root)
     assert set(cards) == {"valid.md"}
-    assert len(rejected) == 5
+    assert len(rejected) == 7
     conn = _index.rebuild_index(db.root, db.head())
     try:
         assert dict(_index.malformed(conn)) == rejected

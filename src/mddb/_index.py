@@ -279,7 +279,6 @@ def rebuild_index(root: Path, head: str = "") -> sqlite3.Connection:
 
     Raises:
         ValueError: A tracked ``.md`` file has no Git lineage.
-        sqlite3.IntegrityError: Two cards share the same ``id``.
     """
     db_path = cache_path(root)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -295,9 +294,8 @@ def rebuild_index(root: Path, head: str = "") -> sqlite3.Connection:
             check=False,
         )
         head = resolved.stdout.strip() if resolved.returncode == 0 else ""
-    tree = _tree(root, head) if head else {}
-    relpaths = sorted(path for path in tree if path.endswith(".md"))
-    cards, malformed = _cards_from_tree(conn, root, tree, relpaths)
+    cards, malformed = read_committed_cards(root, head) if head else ({}, {})
+    relpaths = sorted(cards.keys() | malformed.keys())
     lineage = first_commits(root, relpaths, head)
     with conn:
         conn.execute(
@@ -324,7 +322,8 @@ def refresh_index(
 ) -> sqlite3.Connection:
     """Refresh a current-schema cache across an ancestor HEAD advance."""
     changed = _changed_paths(root, cached_head, head)
-    tree = _tree(root, head)
+    cards, malformed = read_committed_cards(root, head)
+    indexed_paths = {row[0] for row in conn.execute("SELECT relpath FROM entries")}
     cached_paths = {
         row[0]
         for row in conn.execute(
@@ -336,17 +335,17 @@ def refresh_index(
         for path in changed
         if Path(path).suffix
     }
-    candidates &= cached_paths | {path for path in tree if path.endswith(".md")}
-    current = sorted(
-        path for path in candidates if path in tree and path.endswith(".md")
-    )
-    cards, malformed = _cards_from_tree(conn, root, tree, current)
+    candidates &= cached_paths | cards.keys() | malformed.keys()
+    candidates |= indexed_paths ^ cards.keys()
+    candidates |= malformed.keys()
+    current = sorted(candidates & cards.keys())
     lineage = _refresh_lineage(root, conn, cached_head, head, current)
     with conn:
         for relpath in candidates:
             conn.execute("DELETE FROM entries WHERE relpath = ?", (relpath,))
             conn.execute("DELETE FROM malformed WHERE relpath = ?", (relpath,))
-        for relpath, (card, blob_relpath) in cards.items():
+        for relpath in current:
+            card, blob_relpath = cards[relpath]
             insert(conn, card, relpath, lineage[relpath], blob_relpath)
         conn.executemany(
             "INSERT INTO malformed(relpath, error) VALUES (?, ?)", malformed.items()
@@ -354,6 +353,63 @@ def refresh_index(
         analyze(conn)
         set_git_head(conn, head)
     return conn
+
+
+def read_committed_cards(
+    path: Path | str, revision: str = "HEAD"
+) -> tuple[dict[str, tuple[Card, str | None]], dict[str, str]]:
+    """Read indexable cards from one committed deck revision.
+
+    No deck lock or cache is accessed. Card bytes and paired-blob membership
+    come from the same Git tree, regardless of working-tree changes. Acceptance
+    uses the index schema and insertion code; all paths sharing a card id are
+    rejected rather than choosing one of them.
+
+    Args:
+        path: Path to an existing deck.
+        revision: Git revision to read, defaulting to HEAD.
+
+    Returns:
+        Accepted relative paths mapped to (Card, paired-blob relative path or
+        None), and rejected relative paths mapped to diagnostic strings. Blob
+        paths describe the committed tree, not necessarily the working tree.
+
+    Raises:
+        subprocess.CalledProcessError: Git cannot read the revision or its blobs.
+    """
+    root = Path(path).expanduser().resolve()
+    tree = _tree(root, revision)
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.executescript(_SCHEMA)
+        cards, rejected = _cards_from_tree(
+            conn, root, tree, sorted(path for path in tree if path.endswith(".md"))
+        )
+        for relpath, (card, blob_relpath) in list(cards.items()):
+            try:
+                with conn:
+                    insert(conn, card, relpath, "", blob_relpath)
+                    conn.rollback()
+            except (
+                sqlite3.IntegrityError,
+                sqlite3.ProgrammingError,
+                OverflowError,
+                UnicodeError,
+            ) as error:
+                rejected[relpath] = str(error)
+                del cards[relpath]
+        identities = {}
+        for relpath, (card, _blob) in cards.items():
+            identities.setdefault(card.id, []).append(relpath)
+        for card_id, paths in identities.items():
+            if len(paths) > 1:
+                for relpath in paths:
+                    rejected[relpath] = f"duplicate id {card_id!r}: {', '.join(paths)}"
+                    del cards[relpath]
+        return cards, rejected
+    finally:
+        conn.close()
 
 
 def _tree(root: Path, head: str) -> dict[str, str]:
@@ -410,7 +466,7 @@ def _cards_from_tree(
             for field in ("title", "summary", "kind"):
                 try:
                     conn.execute("SELECT ?", (card.yaml.get(field),))
-                except (sqlite3.ProgrammingError, OverflowError) as error:
+                except (sqlite3.ProgrammingError, OverflowError, UnicodeError) as error:
                     malformed[relpath] = f"{field} cannot be indexed: {error}"
                     break
             else:
@@ -424,7 +480,7 @@ def _cards_from_tree(
                             break
                     else:
                         cards[relpath] = (card, hits[0] if hits else None)
-                except (sqlite3.ProgrammingError, OverflowError) as error:
+                except (sqlite3.ProgrammingError, OverflowError, UnicodeError) as error:
                     malformed[relpath] = f"entry_fields cannot be indexed: {error}"
     return cards, malformed
 

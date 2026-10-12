@@ -9,7 +9,12 @@ agent can ``print(mddb.SCHEMA_DOC)`` to recall the schema and the FTS idiom.
 """
 
 from ._core import ConflictError, MDDB
-from ._index import SCHEMA_DOC, IndexUnavailable, open_current_index
+from ._index import (
+    SCHEMA_DOC,
+    IndexUnavailable,
+    open_current_index,
+    read_committed_cards,
+)
 from .card import Card
 
 __version__ = "0.0.14"
@@ -20,4 +25,5 @@ __all__ = [
     "IndexUnavailable",
     "SCHEMA_DOC",
     "open_current_index",
+    "read_committed_cards",
 ]

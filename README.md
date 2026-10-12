@@ -53,6 +53,12 @@ without locks or cache access. It returns accepted paths mapped to
 `(Card, paired_blob_relative_path_or_None)` and rejected paths mapped to
 diagnostics. It applies the index's acceptance rules, including rejecting every
 card in a duplicate-id group. Index rebuilds and refreshes use the same reader.
+Passing `kind="agent"` (or another filing kind) returns complete matching
+Cards using a separate disposable Git-blob eligibility census. Warm calls
+read only matching card bytes; duplicate IDs across all kinds and paired-blob
+membership are still checked against the captured tree. The census is
+published atomically without locks, prunes obsolete OIDs on ordinary HEAD
+reads, and rebuilds after deletion or validation-code changes.
 
 ## Semantic merge driver
 

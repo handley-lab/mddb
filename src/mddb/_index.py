@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
 import os
 import sqlite3
 import subprocess
+import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -356,11 +358,11 @@ def refresh_index(
 
 
 def read_committed_cards(
-    path: Path | str, revision: str = "HEAD"
+    path: Path | str, revision: str = "HEAD", *, kind: str | None = None
 ) -> tuple[dict[str, tuple[Card, str | None]], dict[str, str]]:
     """Read indexable cards from one committed deck revision.
 
-    No deck lock or cache is accessed. Card bytes and paired-blob membership
+    No deck lock or mutable index is accessed. Card bytes and paired-blob membership
     come from the same Git tree, regardless of working-tree changes. Acceptance
     uses the index schema and insertion code; all paths sharing a card id are
     rejected rather than choosing one of them.
@@ -370,6 +372,9 @@ def read_committed_cards(
     Args:
         path: Path to an existing deck.
         revision: Git revision to read, defaulting to HEAD.
+        kind: Return only cards with this filing kind. This uses a disposable
+            blob-OID eligibility census; unchanged nonmatching cards need not
+            be read or parsed again. None reads all cards without a cache.
 
     Returns:
         Accepted relative paths mapped to (Card, paired-blob relative path or
@@ -387,22 +392,12 @@ def read_committed_cards(
         conn.executescript(_SCHEMA)
         for trigger in ("entries_ai", "entries_ad", "entries_au"):
             conn.execute(f"DROP TRIGGER {trigger}")
+        if kind is not None:
+            return _selected_committed_cards(conn, root, tree, kind, revision == "HEAD")
         cards, rejected = _cards_from_tree(
             conn, root, tree, sorted(path for path in tree if path.endswith(".md"))
         )
-        for relpath, (card, blob_relpath) in list(cards.items()):
-            try:
-                with conn:
-                    _insert(conn, card, relpath, "", blob_relpath, "")
-                    conn.rollback()
-            except (
-                sqlite3.IntegrityError,
-                sqlite3.ProgrammingError,
-                OverflowError,
-                UnicodeError,
-            ) as error:
-                rejected[relpath] = str(error)
-                del cards[relpath]
+        _validate_committed_cards(conn, cards, rejected)
         identities = {}
         for relpath, (card, _blob) in cards.items():
             identities.setdefault(card.id, []).append(relpath)
@@ -414,6 +409,140 @@ def read_committed_cards(
         return cards, rejected
     finally:
         conn.close()
+
+
+def _validate_committed_cards(conn, cards, rejected, *, intrinsic=False):
+    for relpath, (card, blob_relpath) in list(cards.items()):
+        try:
+            with conn:
+                _insert(
+                    conn,
+                    card,
+                    "" if intrinsic else relpath,
+                    "",
+                    None if intrinsic else blob_relpath,
+                    "",
+                )
+                conn.rollback()
+        except (
+            sqlite3.IntegrityError,
+            sqlite3.ProgrammingError,
+            OverflowError,
+            UnicodeError,
+        ) as error:
+            rejected[relpath] = str(error)
+            del cards[relpath]
+
+
+def _committed_census_path(root: Path) -> Path:
+    digest = hashlib.sha1(str(root).encode()).hexdigest()
+    base = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
+    return base / "mddb" / digest / "committed.json"
+
+
+def _committed_validation_version() -> str:
+    # Include the actual acceptance code, not a manually maintained package version.
+    digest = hashlib.sha256(b"committed-census-1")
+    for source in (Path(__file__), Path(__file__).with_name("card.py")):
+        digest.update(source.read_bytes())
+    digest.update(_SCHEMA.encode())
+    digest.update(yaml.__version__.encode())
+    digest.update(yaml._yaml.get_version_string().encode())
+    return digest.hexdigest()
+
+
+def _write_committed_census(path: Path, document: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            json.dump(document, stream, separators=(",", ":"))
+            stream.close()
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def _selected_committed_cards(conn, root, tree, kind, publish):
+    path = _committed_census_path(root)
+    version = _committed_validation_version()
+    try:
+        document = json.loads(path.read_text())
+    except FileNotFoundError:
+        document = {}
+    prior = document.get("blobs", {}) if document.get("version") == version else {}
+    markdown = {p: oid for p, oid in tree.items() if p.endswith(".md")}
+    records = {oid: prior[oid] for oid in set(markdown.values()) if oid in prior}
+    missing = {}
+    for relpath, oid in markdown.items():
+        if oid not in records:
+            missing.setdefault(oid, relpath)
+    parsed, errors = (
+        _cards_from_tree(conn, root, markdown, sorted(missing.values()))
+        if missing
+        else ({}, {})
+    )
+    _validate_committed_cards(conn, parsed, errors, intrinsic=True)
+    for oid, relpath in missing.items():
+        if relpath in errors:
+            records[oid] = [None, None, errors[relpath]]
+        else:
+            card = parsed[relpath][0]
+            filing_kind = card.yaml.get("kind")
+            records[oid] = [
+                card.id,
+                filing_kind if isinstance(filing_kind, str) else None,
+                None,
+            ]
+    if publish and (records != prior or document.get("version") != version):
+        _write_committed_census(path, {"version": version, "blobs": records})
+
+    blobs = _paired_blobs(tree)
+    eligible, rejected, identities = {}, {}, {}
+    for relpath, oid in sorted(markdown.items()):
+        parsed_path = Path(relpath)
+        hits = blobs.get((parsed_path.parent, parsed_path.stem), [])
+        card_id, filing_kind, error = records[oid]
+        if len(hits) > 1:
+            error = f"multiple blobs for {parsed_path.name}: {sorted(Path(p).name for p in hits)}"
+        blob = hits[0] if len(hits) == 1 else None
+        if error is None:
+            try:
+                conn.execute("SELECT ?, ?", (relpath, blob))
+            except UnicodeError as failure:
+                error = str(failure)
+        if error is not None:
+            rejected[relpath] = error
+        else:
+            eligible[relpath] = (filing_kind, blob)
+            identities.setdefault(card_id, []).append(relpath)
+    for card_id, paths in identities.items():
+        if len(paths) > 1:
+            for relpath in paths:
+                rejected[relpath] = f"duplicate id {card_id!r}: {', '.join(paths)}"
+                del eligible[relpath]
+    selected = {
+        p: blob for p, (filing_kind, blob) in eligible.items() if filing_kind == kind
+    }
+    objects = [(p, tree[p]) for p in selected if p not in parsed]
+    texts = _cat_blobs(root, objects) if objects else {}
+    cards = {
+        p: (
+            parsed[p][0] if p in parsed else Card.from_text(texts.pop(p).decode()),
+            blob,
+        )
+        for p, blob in selected.items()
+    }
+    return cards, rejected
+
+
+def _paired_blobs(tree):
+    blobs = {}
+    for path in tree:
+        parsed = Path(path)
+        if parsed.suffix not in ("", ".md"):
+            blobs.setdefault((parsed.parent, parsed.stem), []).append(path)
+    return blobs
 
 
 def _tree(root: Path, head: str) -> dict[str, str]:
@@ -441,11 +570,7 @@ def _cards_from_tree(
 
     Returns the cards, and the error for each selected path that is not a card.
     """
-    blobs: dict[tuple[Path, str], list[str]] = {}
-    for path in tree:
-        parsed = Path(path)
-        if parsed.suffix not in ("", ".md"):
-            blobs.setdefault((parsed.parent, parsed.stem), []).append(path)
+    blobs = _paired_blobs(tree)
     texts = _cat_blobs(root, [(path, tree[path]) for path in relpaths])
     cards = {}
     malformed = {}

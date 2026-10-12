@@ -322,23 +322,29 @@ def refresh_index(
 ) -> sqlite3.Connection:
     """Refresh a current-schema cache across an ancestor HEAD advance."""
     changed = _changed_paths(root, cached_head, head)
-    cards, malformed = read_committed_cards(root, head)
+    tree = _tree(root, head)
+    tracked = {path for path in tree if path.endswith(".md")}
     indexed_paths = {row[0] for row in conn.execute("SELECT relpath FROM entries")}
-    cached_paths = {
-        row[0]
-        for row in conn.execute(
-            "SELECT relpath FROM entries UNION SELECT relpath FROM malformed"
-        )
-    }
+    malformed_paths = {row[0] for row in conn.execute("SELECT relpath FROM malformed")}
     candidates = {
         path if path.endswith(".md") else str(Path(path).with_suffix(".md"))
         for path in changed
         if Path(path).suffix
     }
-    candidates &= cached_paths | cards.keys() | malformed.keys()
-    candidates |= indexed_paths ^ cards.keys()
+    candidates &= indexed_paths | malformed_paths | tracked
+    candidates |= malformed_paths
+    cards, malformed = _accepted_cards(root, tree, sorted(candidates & tracked))
+    indexed = [
+        row
+        for card_id in {card.id for card, _blob in cards.values()}
+        for row in conn.execute(
+            "SELECT id, relpath FROM entries WHERE id = ?", (card_id,)
+        )
+        if row[1] not in candidates
+    ]
+    _reject_duplicate_ids(cards, malformed, indexed)
     candidates |= malformed.keys()
-    current = sorted(candidates & cards.keys())
+    current = sorted(cards)
     lineage = _refresh_lineage(root, conn, cached_head, head, current)
     with conn:
         for relpath in candidates:
@@ -379,13 +385,22 @@ def read_committed_cards(
     """
     root = Path(path).expanduser().resolve()
     tree = _tree(root, revision)
+    cards, rejected = _accepted_cards(
+        root, tree, sorted(path for path in tree if path.endswith(".md"))
+    )
+    _reject_duplicate_ids(cards, rejected, [])
+    return cards, rejected
+
+
+def _accepted_cards(
+    root: Path, tree: dict[str, str], relpaths: list[str]
+) -> tuple[dict[str, tuple[Card, str | None]], dict[str, str]]:
+    """Read selected cards from one tree and accept those the index can insert."""
     conn = sqlite3.connect(":memory:")
     try:
         conn.execute("PRAGMA foreign_keys=ON")
         conn.executescript(_SCHEMA)
-        cards, rejected = _cards_from_tree(
-            conn, root, tree, sorted(path for path in tree if path.endswith(".md"))
-        )
+        cards, rejected = _cards_from_tree(conn, root, tree, relpaths)
         for relpath, (card, blob_relpath) in list(cards.items()):
             try:
                 with conn:
@@ -399,17 +414,28 @@ def read_committed_cards(
             ) as error:
                 rejected[relpath] = str(error)
                 del cards[relpath]
-        identities = {}
-        for relpath, (card, _blob) in cards.items():
-            identities.setdefault(card.id, []).append(relpath)
-        for card_id, paths in identities.items():
-            if len(paths) > 1:
-                for relpath in paths:
-                    rejected[relpath] = f"duplicate id {card_id!r}: {', '.join(paths)}"
-                    del cards[relpath]
         return cards, rejected
     finally:
         conn.close()
+
+
+def _reject_duplicate_ids(
+    cards: dict[str, tuple[Card, str | None]],
+    rejected: dict[str, str],
+    indexed: list[tuple[str, str]],
+) -> None:
+    """Reject every path whose id is shared with another read or indexed path."""
+    identities = {}
+    for card_id, relpath in indexed:
+        identities.setdefault(card_id, []).append(relpath)
+    for relpath, (card, _blob) in cards.items():
+        identities.setdefault(card.id, []).append(relpath)
+    for card_id, paths in identities.items():
+        if len(paths) > 1:
+            paths = sorted(paths)
+            for relpath in paths:
+                rejected[relpath] = f"duplicate id {card_id!r}: {', '.join(paths)}"
+                cards.pop(relpath, None)
 
 
 def _tree(root: Path, head: str) -> dict[str, str]:

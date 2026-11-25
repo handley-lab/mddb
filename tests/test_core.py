@@ -583,6 +583,33 @@ def test_refresh_reads_changed_card_and_blob_membership_from_commit(db, seed):
     ).fetchone() == ("committed", None)
 
 
+def test_refresh_reads_only_changed_and_malformed_cards(db, seed, monkeypatch):
+    from mddb import _index
+
+    seed(title="Unchanged", summary="s", relpath="unchanged.md")
+    card = seed(title="Changed", summary="s", relpath="changed.md")
+    (db.root / "bad.md").write_text("not a card")
+    _external_commit(db, "malformed card")
+    db.conn.close()
+    mddb.MDDB(db.root).conn.close()
+    (db.root / "changed.md").write_text(_card_text(card.id, summary="edited"))
+    _external_commit(db, "edit one card")
+    read = []
+    cat_blobs = _index._cat_blobs
+
+    def record(root, objects):
+        read.extend(path for path, _blob in objects)
+        return cat_blobs(root, objects)
+
+    monkeypatch.setattr(_index, "_cat_blobs", record)
+    refreshed = mddb.MDDB(db.root)
+    assert sorted(read) == ["bad.md", "changed.md"]
+    assert refreshed.conn.execute(
+        "SELECT summary FROM entries WHERE id = ?", (card.id,)
+    ).fetchone() == ("edited",)
+    refreshed.conn.close()
+
+
 def test_refresh_with_unavailable_cached_commit_rebuilds(db, seed, monkeypatch):
     from mddb import _index
 
